@@ -708,6 +708,8 @@ def build_memory_write_metadata(
     execution_context: Optional[str] = None,
     task_id: Optional[str] = None,
     tool_call_id: Optional[str] = None,
+    risk_class: Optional[str] = None,
+    evidence_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build provenance metadata for external memory-provider mirrors."""
     metadata: Dict[str, Any] = {
@@ -720,12 +722,21 @@ def build_memory_write_metadata(
         "parent_session_id": agent._parent_session_id or "",
         "platform": agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
         "tool_name": "memory",
+        "brief_id": getattr(agent, "_execution_brief_id", "") or getattr(agent, "_brief_id", ""),
+        "agent_session_id": getattr(agent, "_agent_session_id", "") or agent.session_id or "",
+        "agent_role": getattr(agent, "_agent_role", ""),
+        "model_provider": getattr(agent, "provider", ""),
+        "model": getattr(agent, "model", ""),
+        "risk_class": risk_class or getattr(agent, "_learning_risk_class", ""),
     }
     if task_id:
         metadata["task_id"] = task_id
     if tool_call_id:
         metadata["tool_call_id"] = tool_call_id
-    return {k: v for k, v in metadata.items() if v not in {None, ""}}
+    refs = evidence_refs if evidence_refs is not None else getattr(agent, "_learning_evidence_refs", None)
+    if refs:
+        metadata["evidence_refs"] = list(refs)
+    return {k: v for k, v in metadata.items() if v is not None and v != ""}
 
 
 def _snapshot_review_usage(review_agent: Any) -> Dict[str, Any]:

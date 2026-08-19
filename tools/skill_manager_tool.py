@@ -1429,7 +1429,21 @@ _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
 )
 
 
-def _apply_skill_write_gate(action, name, **payload_kwargs):
+def _skill_execution_metadata(*, task_id=None, session_id=None) -> Dict[str, Any]:
+    """Build audit-only metadata for staged skill writes."""
+    metadata: Dict[str, Any] = {
+        "task_id": task_id or "",
+        "agent_session_id": session_id or "",
+    }
+    try:
+        from tools import write_approval as wa
+        metadata["learning_origin"] = wa.current_origin()
+    except Exception:
+        pass
+    return {k: v for k, v in metadata.items() if v is not None and v != ""}
+
+
+def _apply_skill_write_gate(action, name, *, execution_metadata=None, **payload_kwargs):
     """Evaluate the skill write gate. Returns a JSON tool-result string when the
     write should NOT proceed (blocked or staged), or None to perform the real
     write. Bypassed during approved-pending replay.
@@ -1460,7 +1474,13 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
         old_string=payload_kwargs.get("old_string") or "",
         new_string=payload_kwargs.get("new_string") or "",
     )
-    record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
+    record = wa.stage_write(
+        wa.SKILLS,
+        payload,
+        summary=gist,
+        origin=wa.current_origin(),
+        metadata=execution_metadata,
+    )
     return json.dumps(
         {"success": True, "staged": True, "pending_id": record["id"],
          "gist": gist, "message": decision.message},
@@ -1572,6 +1592,10 @@ def skill_manage(
         file_path=file_path, file_content=file_content,
         old_string=old_string, new_string=new_string,
         replace_all=replace_all, absorbed_into=absorbed_into,
+        execution_metadata=_skill_execution_metadata(
+            task_id=task_id,
+            session_id=session_id,
+        ),
     )
     if gate_result is not None:
         return gate_result

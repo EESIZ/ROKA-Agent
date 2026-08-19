@@ -2,6 +2,30 @@
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
 
+# ROKA-Agent
+
+ROKA-Agent is an experimental fork of Hermes Agent focused on intent-preserving
+agent control. The project keeps Hermes' existing vocabulary and mechanisms
+where possible, then adds a thin provenance layer around execution briefs,
+session separation, review, learning, and approval gates.
+
+The first ROKA milestone is deliberately conservative: map the existing Hermes
+functions before changing behavior, avoid rebuilding features Hermes already
+has, and record enough metadata to explain which brief, agent session, model,
+role, and evidence path produced a proposed memory or skill write.
+
+Core design notes:
+
+- [ROKA function impact map](docs/roka-function-impact-map.md)
+- [ROKA learning control map](docs/roka-learning-control-map.md)
+- [ROKA agent documentation map](docs/roka-agent-doc-map.md)
+- [ROKA license note](docs/roka-license-note.md)
+
+This fork still contains upstream Hermes Agent code under the existing MIT
+license. ROKA-specific methodology documents may use a separate content license;
+see the license note before redistributing or commercializing ROKA-specific
+materials.
+
 # Hermes Agent ☤
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/">Hermes Agent</a> | <a href="https://hermes-agent.nousresearch.com/">Hermes Desktop</a>

@@ -170,6 +170,28 @@ def test_handle_approve_all(hermes_home):
     assert len(store.user_entries) == 2
 
 
+def test_stage_write_persists_audit_metadata(hermes_home):
+    from tools import write_approval as wa
+    record = wa.stage_write(
+        "memory",
+        {"action": "add", "target": "user", "content": "a"},
+        summary="a",
+        origin="foreground",
+        metadata={
+            "brief_id": "brief-1",
+            "agent_session_id": "session-1",
+            "empty": "",
+        },
+    )
+
+    loaded = wa.get_pending("memory", record["id"])
+    assert loaded["payload"] == {"action": "add", "target": "user", "content": "a"}
+    assert loaded["metadata"] == {
+        "brief_id": "brief-1",
+        "agent_session_id": "session-1",
+    }
+
+
 def test_handle_approval_on(hermes_home):
     from hermes_cli.write_approval_commands import handle_pending_subcommand
     from tools import write_approval as wa

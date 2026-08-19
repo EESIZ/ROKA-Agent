@@ -67,6 +67,10 @@ _SUBSYSTEMS = (MEMORY, SKILLS)
 CONFIG_KEY = "write_approval"
 
 
+def _metadata_value_present(value: Any) -> bool:
+    return value is not None and value != ""
+
+
 # ---------------------------------------------------------------------------
 # Config resolution
 # ---------------------------------------------------------------------------
@@ -112,7 +116,8 @@ def _pending_dir(subsystem: str) -> Path:
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any],
-                *, summary: str, origin: str) -> Dict[str, Any]:
+                *, summary: str, origin: str,
+                metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Persist a pending write and return a short record describing it.
 
     Args:
@@ -124,6 +129,9 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
             For skills this is the LLM/heuristic gist; for memory it can be the
             entry text itself.
         origin: ``foreground`` or ``background_review`` — recorded for audit.
+        metadata: optional provenance that helps explain why the pending write
+            exists. It is audit-only and must not be required to replay the
+            payload when approved.
 
     Returns a dict with ``id`` and metadata. Best-effort: on disk failure it
     logs and still returns a record (the write is simply lost, which is the
@@ -139,6 +147,10 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
         "created_at": time.time(),
         "payload": payload,
     }
+    if metadata:
+        clean_metadata = {k: v for k, v in metadata.items() if _metadata_value_present(v)}
+        if clean_metadata:
+            record["metadata"] = clean_metadata
     try:
         d = _pending_dir(subsystem)
         d.mkdir(parents=True, exist_ok=True)
