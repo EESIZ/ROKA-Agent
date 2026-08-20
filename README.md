@@ -1,5 +1,7 @@
 # ROKA-Agent
 
+[한국어](README.ko.md) | English
+
 ROKA-Agent is an intent-preserving control profile for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
@@ -14,6 +16,46 @@ treated as reviewable proposals instead of silent self-modification.
 ROKA does not replace Hermes sessions, tools, model routing, memory, skills, or
 approval storage. Its first engineering rule is **do not rebuild the wheel**:
 extend existing Hermes functions at the smallest useful control points.
+
+## Conceptual Origin
+
+ROKA started from a structural analogy between two fields that look unrelated at
+first glance: modern command-and-control doctrine and LLM harness engineering.
+
+Military command systems evolved from simple orders toward richer command
+payloads: situational reports, METT-TC-style context, 9-Line formats, mission
+command, C4I, and eventually joint data-centric concepts such as CJADC2. The
+pattern is not "more control" or "more autonomy" by itself. The pattern is that
+the observer and the actor are often separated, and the system survives that
+separation by transmitting intent, context, and constraints before the link is
+lost or the situation changes.
+
+LLM agents have been moving through a similar progression: simple prompts,
+structured prompts, tool policies, memory, retrieval, and multi-agent
+orchestration. A plain prompt is like a short order with too much left implicit.
+A pile of context is like a headquarters feed with no mission command. A fully
+autonomous agent without shared intent becomes locally clever and globally
+fragile.
+
+The design question behind ROKA was therefore:
+
+> What would an LLM control loop look like if we treated every user request as
+> an intent package instead of a raw prompt?
+
+ROKA's answer is the runtime pattern used in this fork:
+
+- Compile the user's ordinary request into one immutable execution brief.
+- Put observation and critique in separate tool-free advisor contexts.
+- Give action to one tool-enabled executor.
+- Preserve the same task, purpose, constraints, assumptions, deviation rule,
+  autonomy policy, and review policy through every execution iteration.
+- Treat missing, empty, or failed advisors as visible degraded state instead of
+  pretending the full staff process happened.
+
+This is also why ROKA avoids military vocabulary in the runtime interface. The
+military analogy explains the origin of the idea; the implementation remains a
+Hermes control profile built from existing Hermes concepts: MoA presets,
+reference models, tools, memory, skills, approval gates, and provider routing.
 
 ## Release Status
 
