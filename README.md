@@ -17,7 +17,7 @@ extend existing Hermes functions at the smallest useful control points.
 
 ## Release Status
 
-The **v0.1 source release is ready**. The runtime control path is implemented
+**v0.1.0 released.** The runtime control path is implemented
 and covered by focused and upstream regression tests. A live four-provider run
 still requires the operator to configure Codex and OpenRouter credentials; the
 release does not bundle or silently substitute credentials.

@@ -30,6 +30,9 @@ export*
 __pycache__/model_tools.cpython-310.pyc
 __pycache__/web_tools.cpython-310.pyc
 logs/
+# Accidental root-level debug artifacts.
+/log.txt
+/sqlite_leak_fix.png
 data/
 # Bundled community plugin index seed (shipped as package data) — the bare
 # `data/` pattern above would otherwise swallow it.
