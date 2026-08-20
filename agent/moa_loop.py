@@ -37,6 +37,8 @@ from agent.transports import get_transport
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_REFERENCE_SENTINEL = "[failed: reference model returned empty response]"
+
 # --- MoA privacy filter (config: moa.privacy_filter — '' | display | full) ---
 #
 # Advisor (reference) outputs can echo PII from the conversation — emails,
@@ -711,7 +713,10 @@ def _run_reference(
             cost_source = cost.source
         except Exception:  # pragma: no cover - defensive
             pass
-        _output_text = _extract_text(response) or "(empty response)"
+        _output_text = _extract_text(response)
+        if not _output_text:
+            logger.warning("MoA reference %s returned empty response", label)
+            _output_text = _EMPTY_REFERENCE_SENTINEL
         acct = _RefAccounting(
             usage,
             cost_usd,

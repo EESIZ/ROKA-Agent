@@ -328,8 +328,10 @@ def advisor_system_prompt(
             "Convert the user's ordinary request into one execution brief. Return "
             "ONLY a JSON object with these keys: task, purpose, constraints "
             "(array), assumptions (array), deviation_rule, autonomy_policy, and "
-            "review_policy. Preserve the user's actual priorities. Do not invent "
-            "authority, side effects, deadlines, or requirements."
+            "review_policy. Do not include markdown, user-facing prose, commands, "
+            "or any text outside the JSON object. Preserve the user's actual "
+            "priorities. Do not invent authority, side effects, deadlines, or "
+            "requirements."
         )
 
     brief_text = execution_brief.render() if execution_brief is not None else "{}"
@@ -338,7 +340,13 @@ def advisor_system_prompt(
             "Treat the execution brief below as immutable. Identify scope expansion, "
             "conflicting constraints, unsafe assumptions, missing authority, and the "
             "specific conditions that require stopping or deviating. Give concrete "
-            "guidance to the acting model; do not rewrite the brief."
+            "guidance to the acting model; do not rewrite the brief. Always return "
+            "a non-empty constraint assessment. If no breach is found, say "
+            "`No constraint breach found` and name the boundaries to preserve. "
+            "Flag any drift toward host OS/package installation, sudo/apt commands, "
+            "Chromium/Xvfb setup, approval bypass, or changes outside the requested "
+            "repository/service boundary unless the execution brief explicitly "
+            "authorizes it."
         )
     else:
         instructions = (

@@ -215,6 +215,90 @@ def test_roka_moa_compiles_once_then_runs_two_reviewers_and_executor(
     assert any("role=intent_analyst" in label for label in second_iteration_labels)
 
 
+def test_empty_constraint_review_is_visible_degraded_state(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    _write_roka_config(home)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    events = []
+    aggregator_messages = []
+    intent_json = json.dumps(
+        {
+            "task": "Review the deployed runtime",
+            "purpose": "Expose failed advisors instead of pretending they advised",
+            "constraints": ["Do not modify host services."],
+            "assumptions": ["The repository contains the control code."],
+            "deviation_rule": "Report any required host change first.",
+            "autonomy_policy": "Proceed only inside the repository.",
+            "review_policy": "Require observable evidence.",
+        }
+    )
+
+    monkeypatch.setattr(
+        "agent.moa_loop._slot_runtime",
+        lambda slot: {"provider": slot["provider"], "model": slot["model"]},
+    )
+    monkeypatch.setattr(
+        "agent.moa_loop._trim_messages_for_reference",
+        lambda messages, *_args, **_kwargs: messages,
+    )
+    monkeypatch.setattr(
+        "agent.moa_loop._maybe_apply_moa_cache_control",
+        lambda messages, *_args, **_kwargs: messages,
+    )
+
+    def fake_call(**kwargs):
+        messages = kwargs.get("messages") or []
+        system = str(messages[0].get("content") or "") if messages else ""
+        if "ROKA role: intent_analyst" in system:
+            return _response(intent_json)
+        if "ROKA role: constraint_reviewer" in system:
+            return _response("")
+        if "ROKA role: verification_reviewer" in system:
+            return _response("verification evidence guidance")
+        aggregator_messages.extend(messages)
+        return _response("executor acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call)
+
+    from agent.moa_loop import MoAChatCompletions
+
+    agent = SimpleNamespace(
+        session_id="parent-session",
+        provider="moa",
+        model="roka-test",
+        _interrupt_requested=False,
+        _cache_disabled=False,
+        _cache_ttl=None,
+    )
+    facade = MoAChatCompletions(
+        "roka-test",
+        agent=agent,
+        reference_callback=lambda event, **kwargs: events.append((event, kwargs)),
+    )
+
+    facade.create(messages=[{"role": "user", "content": "Review runtime."}])
+
+    constraint_events = [
+        payload
+        for event, payload in events
+        if event == "moa.reference"
+        and "role=constraint_reviewer" in payload.get("label", "")
+    ]
+    assert constraint_events
+    assert constraint_events[0]["text"].startswith("[failed:")
+
+    aggregator_text = "\n".join(
+        str(message.get("content") or "") for message in aggregator_messages
+    )
+    assert "Reference 1" in aggregator_text
+    assert "Reference 2" not in aggregator_text
+    assert "verification evidence guidance" in aggregator_text
+    assert "(empty response)" not in aggregator_text
+    assert "Unavailable advisor roles/models:" in aggregator_text
+    assert "role=constraint_reviewer" in aggregator_text
+
+
 def test_live_agent_loop_carries_roka_brief_through_real_tool_dispatch(
     monkeypatch, tmp_path
 ):
@@ -473,6 +557,38 @@ def test_reference_reports_actual_fallback_route(monkeypatch):
     assert "actual=actual-provider:actual-reviewer" in label
     assert accounting.provider == "actual-provider"
     assert accounting.model == "actual-reviewer"
+
+
+def test_empty_reference_response_is_failed_advice(monkeypatch):
+    from agent.moa_loop import _is_failed_reference, _run_reference
+
+    monkeypatch.setattr(
+        "agent.moa_loop._slot_runtime",
+        lambda slot: {"provider": slot["provider"], "model": slot["model"]},
+    )
+    monkeypatch.setattr(
+        "agent.moa_loop._trim_messages_for_reference",
+        lambda messages, *_args, **_kwargs: messages,
+    )
+    monkeypatch.setattr(
+        "agent.moa_loop._maybe_apply_moa_cache_control",
+        lambda messages, *_args, **_kwargs: messages,
+    )
+    monkeypatch.setattr("agent.moa_loop.call_llm", lambda **_kwargs: _response(""))
+
+    label, text, accounting = _run_reference(
+        {
+            "provider": "configured-provider",
+            "model": "configured-reviewer",
+            "advisor_role": "constraint_reviewer",
+        },
+        [{"role": "user", "content": "Review this."}],
+    )
+
+    assert "role=constraint_reviewer" in label
+    assert text.startswith("[failed:")
+    assert _is_failed_reference(text)
+    assert accounting.output == text
 
 
 def test_slot_runtime_cache_returns_request_local_copies(monkeypatch):

@@ -30,6 +30,8 @@ class CustomProfile(ProviderProfile):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
+        base_url = str(ctx.get("base_url") or self.base_url or "").lower()
+        is_native_openai = "api.openai.com" in base_url
 
         # Ollama context window
         if ollama_num_ctx:
@@ -54,7 +56,13 @@ class CustomProfile(ProviderProfile):
         if reasoning_config and isinstance(reasoning_config, dict):
             _effort = (reasoning_config.get("effort") or "").strip().lower()
             _enabled = reasoning_config.get("enabled", True)
-            if _effort == "none" or _enabled is False:
+            if is_native_openai:
+                # Custom fallback can route OpenAI-native models through this
+                # profile. OpenAI rejects Ollama-style ``think`` and the chat
+                # completions tool path rejects top-level reasoning controls,
+                # so omit custom reasoning extras entirely.
+                pass
+            elif _effort == "none" or _enabled is False:
                 # Ollama's /v1/chat/completions silently ignores
                 # extra_body.think (only /api/chat honours it — ollama#14820)
                 # but respects the top-level reasoning_effort field, so both

@@ -26,6 +26,31 @@ class TestNvidiaProfile:
 
 
 
+class TestCustomProfile:
+    def test_native_openai_base_url_omits_custom_reasoning_extras(self):
+        p = get_provider_profile("custom")
+
+        extra_body, top_level = p.build_api_kwargs_extras(
+            base_url="https://api.openai.com/v1",
+            reasoning_config={"enabled": False, "effort": "none"},
+        )
+
+        assert extra_body == {}
+        assert top_level == {}
+
+    def test_non_openai_custom_endpoint_keeps_reasoning_controls(self):
+        p = get_provider_profile("custom")
+
+        extra_body, top_level = p.build_api_kwargs_extras(
+            base_url="http://localhost:11434/v1",
+            reasoning_config={"enabled": False, "effort": "none"},
+        )
+
+        assert extra_body["think"] is False
+        assert top_level["reasoning_effort"] == "none"
+
+
+
 class TestKimiProfile:
     def test_temperature_omit(self):
         p = get_provider_profile("kimi")
@@ -217,7 +242,6 @@ class TestQwenProfile:
         eb, tl = p.build_api_kwargs_extras(qwen_session_metadata=meta)
         assert tl["metadata"] == meta
         assert "metadata" not in eb
-
 
 
 

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.roka_control import (
+    advisor_system_prompt,
     bind_execution_metadata,
     build_agent_session_id,
     build_brief_id,
@@ -87,6 +88,45 @@ def test_shape_only_intent_json_is_not_reported_as_advisor_success():
 
     assert brief.source == "fallback"
     assert brief.task == "Keep the user's real request."
+
+
+def test_advisor_prompts_preserve_operational_guardrails():
+    brief = parse_execution_brief(
+        json.dumps(
+            {
+                "task": "Keep the runtime bounded",
+                "purpose": "Prevent fake advisor success",
+                "constraints": ["Do not modify host services."],
+                "assumptions": ["Repository edits are allowed."],
+                "deviation_rule": "Report changed premises.",
+                "autonomy_policy": "Proceed in repo only.",
+                "review_policy": "Require observable evidence.",
+            }
+        ),
+        brief_id="brief_prompt",
+        user_request="Keep the runtime bounded.",
+    )
+
+    intent_prompt = advisor_system_prompt(
+        "base",
+        role="intent_analyst",
+        brief_id=brief.brief_id,
+        agent_session_id="intent-session",
+    )
+    constraint_prompt = advisor_system_prompt(
+        "base",
+        role="constraint_reviewer",
+        brief_id=brief.brief_id,
+        agent_session_id="constraint-session",
+        execution_brief=brief,
+    )
+
+    assert "ONLY a JSON object" in intent_prompt
+    assert "Do not include markdown, user-facing prose" in intent_prompt
+    assert "No constraint breach found" in constraint_prompt
+    assert "sudo/apt" in constraint_prompt
+    assert "Chromium/Xvfb" in constraint_prompt
+    assert "approval bypass" in constraint_prompt
 
 
 def test_turn_and_role_session_ids_are_stable_but_isolated():
