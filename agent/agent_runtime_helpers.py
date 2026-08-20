@@ -3034,6 +3034,15 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
                 exc_info=True,
             )
 
+    # A model switch is a control-context boundary even when both the old and
+    # new routes use the virtual ``moa`` provider (for example ``roka`` -> a
+    # generic MoA preset).  The next ROKA create() will attach a new brief;
+    # keeping the previous one until then could misattribute post-switch work
+    # or a background review to the old user turn.
+    from agent.roka_control import clear_execution_brief_from_agent
+
+    clear_execution_brief_from_agent(agent)
+
 
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,

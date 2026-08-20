@@ -731,7 +731,10 @@ function MoaModelsModal({
 
   const presetNames = Object.keys(draft.presets || {});
   const preset = draft.presets[selected] || draft.presets[presetNames[0]];
-  const slotLabel = (slot: MoaModelSlot) => `${slot.provider || "(provider)"} · ${slot.model || "(model)"}`;
+  const slotLabel = (slot: MoaModelSlot) => {
+    const route = `${slot.provider || "(provider)"} · ${slot.model || "(model)"}`;
+    return slot.advisor_role ? `${route} · ${slot.advisor_role}` : route;
+  };
 
   const updateSelectedPreset = (updater: (preset: MoaConfigResponse["presets"][string]) => MoaConfigResponse["presets"][string]) => {
     setDraft((prev) => ({
@@ -797,6 +800,7 @@ function MoaModelsModal({
   };
 
   if (!preset) return null;
+  const isRokaPreset = preset.control_mode === "roka";
 
   // Portal to document.body: the main dashboard column is `relative z-2`,
   // which traps fixed descendants below the sidebar (same as ModelPickerDialog).
@@ -867,6 +871,7 @@ function MoaModelsModal({
               >
                 <Switch
                   checked={slot.enabled !== false}
+                  disabled={isRokaPreset}
                   onCheckedChange={(checked) =>
                     updateSelectedPreset((prev) => ({
                       ...prev,
@@ -878,10 +883,10 @@ function MoaModelsModal({
                 />
                 <div className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">{slotLabel(slot)}</div>
                 <Button size="sm" outlined onClick={() => setPicker({ kind: "reference", index })}>Change</Button>
-                <Button size="sm" ghost disabled={preset.reference_models.length <= 1} onClick={() => updateSelectedPreset((prev) => ({ ...prev, reference_models: prev.reference_models.filter((_, i) => i !== index) }))}>Remove</Button>
+                <Button size="sm" ghost disabled={isRokaPreset || preset.reference_models.length <= 1} onClick={() => updateSelectedPreset((prev) => ({ ...prev, reference_models: prev.reference_models.filter((_, i) => i !== index) }))}>Remove</Button>
               </div>
             ))}
-            <Button size="sm" outlined onClick={() => updateSelectedPreset((prev) => ({ ...prev, reference_models: [...prev.reference_models, { ...prev.aggregator, enabled: true }] }))}>Add reference model</Button>
+            <Button size="sm" outlined disabled={isRokaPreset} onClick={() => updateSelectedPreset((prev) => ({ ...prev, reference_models: [...prev.reference_models, { ...prev.aggregator, enabled: true }] }))}>Add reference model</Button>
           </div>
 
           <div className="space-y-2">
@@ -912,7 +917,7 @@ function MoaModelsModal({
             }
             setError(null);
             updateSelectedPreset((prev) => {
-              if (picker.kind === "aggregator") return { ...prev, aggregator: { provider, model } };
+              if (picker.kind === "aggregator") return { ...prev, aggregator: { ...prev.aggregator, provider, model } };
               return {
                 ...prev,
                 reference_models: prev.reference_models.map((slot, i) => i === picker.index ? { ...slot, provider, model } : slot),

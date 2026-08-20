@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from agent.errors import MoAPresetNotFoundError
 from hermes_cli.moa_config import (
@@ -158,6 +159,145 @@ def test_validate_moa_payload_agrees_with_clean_slot():
     assert cfg["presets"]["p"]["aggregator"] == payload["presets"]["p"]["aggregator"]
 
 
+def test_roka_preset_validation_and_normalization_preserve_role_contract():
+    from hermes_cli.moa_config import validate_moa_payload
+
+    preset = {
+        "control_mode": "roka",
+        "reference_models": [
+            {"provider": "fake", "model": "intent", "advisor_role": "intent_analyst"},
+            {
+                "provider": "fake",
+                "model": "constraints",
+                "advisor_role": "constraint_reviewer",
+            },
+            {
+                "provider": "fake",
+                "model": "verification",
+                "advisor_role": "verification_reviewer",
+            },
+        ],
+        "aggregator": {"provider": "fake", "model": "executor"},
+    }
+    payload = {"default_preset": "roka", "presets": {"roka": preset}}
+
+    assert validate_moa_payload(payload) == []
+    normalized_config = normalize_moa_config(payload)
+    assert normalized_config["control_mode"] == "roka"
+    normalized = normalized_config["presets"]["roka"]
+    assert normalized["control_mode"] == "roka"
+    assert [
+        slot["advisor_role"] for slot in normalized["reference_models"]
+    ] == [
+        "intent_analyst",
+        "constraint_reviewer",
+        "verification_reviewer",
+    ]
+
+
+def test_shipped_roka_default_is_a_valid_four_route_control_preset():
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    from hermes_cli.moa_config import validate_moa_payload
+
+    moa = DEFAULT_CONFIG["moa"]
+    assert moa["default_preset"] == "roka"
+    assert validate_moa_payload(moa) == []
+    roka = normalize_moa_config(moa)["presets"]["roka"]
+    assert roka["control_mode"] == "roka"
+    assert len(roka["reference_models"]) == 3
+    assert roka["aggregator"]["provider"] != "moa"
+
+
+def test_roka_preset_rejects_duplicate_or_missing_advisor_roles():
+    from hermes_cli.moa_config import validate_moa_payload
+
+    payload = {
+        "presets": {
+            "broken": {
+                "control_mode": "roka",
+                "reference_models": [
+                    {
+                        "provider": "fake",
+                        "model": "one",
+                        "advisor_role": "intent_analyst",
+                    },
+                    {
+                        "provider": "fake",
+                        "model": "two",
+                        "advisor_role": "constraint_reviewer",
+                    },
+                    {
+                        "provider": "fake",
+                        "model": "three",
+                        "advisor_role": "constraint_reviewer",
+                    },
+                ],
+                "aggregator": {"provider": "fake", "model": "executor"},
+            }
+        }
+    }
+
+    problems = validate_moa_payload(payload)
+    assert any("exactly three enabled references with unique roles" in item for item in problems)
+
+
+def test_cli_reconfigure_preserves_fixed_roka_role_slots(monkeypatch):
+    from hermes_cli import moa_cmd
+
+    config = {
+        "moa": {
+            "default_preset": "roka",
+            "presets": {
+                "roka": {
+                    "control_mode": "roka",
+                    "reference_models": [
+                        {
+                            "provider": "old",
+                            "model": "intent",
+                            "advisor_role": "intent_analyst",
+                        },
+                        {
+                            "provider": "old",
+                            "model": "constraints",
+                            "advisor_role": "constraint_reviewer",
+                        },
+                        {
+                            "provider": "old",
+                            "model": "verification",
+                            "advisor_role": "verification_reviewer",
+                        },
+                    ],
+                    "aggregator": {"provider": "old", "model": "executor"},
+                }
+            },
+        }
+    }
+    selections = iter(
+        [
+            {"provider": "new", "model": "intent-2"},
+            {"provider": "new", "model": "constraints-2"},
+            {"provider": "new", "model": "verification-2"},
+            {"provider": "new", "model": "executor-2"},
+        ]
+    )
+    saved = {}
+    monkeypatch.setattr(moa_cmd, "load_config", lambda: config)
+    monkeypatch.setattr(moa_cmd, "_pick_slot", lambda _current=None: next(selections))
+    monkeypatch.setattr(moa_cmd, "save_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr(moa_cmd, "_print_config", lambda _cfg: None)
+
+    moa_cmd.cmd_moa(SimpleNamespace(moa_command="configure", name="roka"))
+
+    preset = saved["moa"]["presets"]["roka"]
+    assert preset["control_mode"] == "roka"
+    assert [slot["advisor_role"] for slot in preset["reference_models"]] == [
+        "intent_analyst",
+        "constraint_reviewer",
+        "verification_reviewer",
+    ]
+    assert all(slot["enabled"] for slot in preset["reference_models"])
+
+
 # ── Per-slot max_tokens ────────────────────────────────────────────────────
 
 
@@ -175,9 +315,5 @@ def test_validate_moa_payload_agrees_with_clean_slot():
 
 
 # --- privacy_filter normalization ---
-
-
-
-
 
 

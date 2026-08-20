@@ -1431,10 +1431,21 @@ _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
 
 def _skill_execution_metadata(*, task_id=None, session_id=None) -> Dict[str, Any]:
     """Build audit-only metadata for staged skill writes."""
-    metadata: Dict[str, Any] = {
-        "task_id": task_id or "",
-        "agent_session_id": session_id or "",
-    }
+    try:
+        from agent.roka_control import current_execution_metadata
+
+        metadata: Dict[str, Any] = current_execution_metadata()
+    except Exception:
+        metadata = {}
+    if task_id:
+        metadata["task_id"] = task_id
+    if session_id:
+        # The registry passes the parent Hermes session ID explicitly.  Keep
+        # the role-scoped ID bound by ROKA so approval records preserve actual
+        # execution isolation; generic calls still fall back to session_id.
+        metadata.setdefault("agent_session_id", session_id)
+        if metadata.get("control_mode") == "roka":
+            metadata.setdefault("parent_session_id", session_id)
     try:
         from tools import write_approval as wa
         metadata["learning_origin"] = wa.current_origin()
@@ -1456,7 +1467,17 @@ def _apply_skill_write_gate(action, name, *, execution_metadata=None, **payload_
     try:
         from tools import write_approval as wa
     except Exception:
-        return None  # fail open
+        try:
+            from agent.roka_control import is_roka_execution_active
+
+            if is_roka_execution_active():
+                return tool_error(
+                    "ROKA skill write blocked: the approval gate is unavailable.",
+                    success=False,
+                )
+        except Exception:
+            pass
+        return None
 
     decision = wa.evaluate_gate(wa.SKILLS)
     if decision.allow:
@@ -1474,15 +1495,22 @@ def _apply_skill_write_gate(action, name, *, execution_metadata=None, **payload_
         old_string=payload_kwargs.get("old_string") or "",
         new_string=payload_kwargs.get("new_string") or "",
     )
-    record = wa.stage_write(
-        wa.SKILLS,
-        payload,
-        summary=gist,
-        origin=wa.current_origin(),
-        metadata=execution_metadata,
-    )
+    try:
+        record = wa.stage_write(
+            wa.SKILLS,
+            payload,
+            summary=gist,
+            origin=wa.current_origin(),
+            metadata=execution_metadata,
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Skill write was neither saved nor staged: {exc}",
+            success=False,
+        )
     return json.dumps(
-        {"success": True, "staged": True, "pending_id": record["id"],
+        {"success": True, "saved": False, "staged": True,
+         "requires_approval": True, "pending_id": record["id"],
          "gist": gist, "message": decision.message},
         ensure_ascii=False,
     )

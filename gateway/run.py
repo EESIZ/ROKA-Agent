@@ -17445,15 +17445,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 normalize_moa_config,
             )
             from hermes_cli.config import load_config
+            from hermes_cli.config_defaults import DEFAULT_CONFIG
 
             moa_payload = event.get_command_args().strip()
             if not moa_payload:
                 return moa_usage()
             try:
                 cfg = load_config()
-                moa_cfg = normalize_moa_config(cfg.get("moa") if isinstance(cfg, dict) else {})
+                raw_moa = cfg.get("moa") if isinstance(cfg, dict) else None
+                if not isinstance(raw_moa, dict) or not raw_moa:
+                    raw_moa = DEFAULT_CONFIG["moa"]
+                moa_cfg = normalize_moa_config(raw_moa)
             except Exception:
-                moa_cfg = normalize_moa_config({})
+                moa_cfg = normalize_moa_config(DEFAULT_CONFIG["moa"])
             preset = moa_cfg["default_preset"]
             try:
                 event.text = moa_payload

@@ -1,158 +1,124 @@
 # ROKA Function Impact Map
 
-This map identifies the Hermes functions ROKA is likely to touch before any
-runtime implementation begins. Scope is intentionally limited to the
-Execution Brief, session separation, background review, memory, skill, and
-delegation surfaces.
+This document records the implemented ROKA v0.1 call graph. It is the review
+map for changes that affect intent compilation, model isolation, tool
+provenance, or durable learning.
 
-## Scope Rule
-
-ROKA must not improve Hermes by broad rewrite.
-
-Before changing code, each proposed change must name:
-
-- the original Hermes function,
-- the smallest ROKA adjustment,
-- direct callers or downstream effects,
-- whether prompt cache, session persistence, tool schemas, or approval behavior
-  are affected.
-
-## High-Level Flow
+## Runtime Graph
 
 ```mermaid
 flowchart TD
-    U[User request] --> BTC[agent.turn_context.build_turn_context]
-    BTC --> LOOP[agent.conversation_loop.run_conversation]
-    LOOP --> EXEC[agent.tool_executor.execute_tool_calls_*]
-    EXEC --> MEM[tools.memory_tool.memory_tool]
-    EXEC --> SKILL[tools.skill_manager_tool.skill_manage]
-    EXEC --> DELEGATE[tools.delegate_tool.delegate_task]
-    DELEGATE --> CHILD[child AIAgent session]
-    LOOP --> FIN[agent.turn_finalizer.finalize_turn]
-    FIN --> BR[agent.background_review.spawn_background_review_thread]
-    BR --> BRRUN[agent.background_review._run_review_in_thread]
-    BRRUN --> MEM
-    BRRUN --> SKILL
-    MEM --> WAG[tools.write_approval.evaluate_gate]
-    SKILL --> WAG
-    MEM --> MGR[agent.memory_manager.notify_memory_tool_write]
-    SKILL --> LEDGER[tools.skill_ledger.record_mutation]
+    ENTRY[provider=moa or one-shot /moa] --> MSG[API messages]
+    MSG --> MC[MoAChatCompletions.create]
+    CLEAN[Clean pre-injection user request] --> MC
+    MC --> BID[build_brief_id]
+    BID --> IR[_run_references_parallel: intent slot]
+    IR --> PARSE[parse_execution_brief]
+    PARSE --> BRIEF[ExecutionBrief frozen dataclass]
+    BRIEF --> CR[_run_reference: constraint reviewer]
+    BRIEF --> VR[_run_reference: verification reviewer]
+    CR --> GUIDE[ROKA control guidance]
+    VR --> GUIDE
+    BRIEF --> GUIDE
+    GUIDE --> AGG[_call_prepared_aggregator: executor]
+    AGG --> MW[_run_agent_tool_execution_middleware]
+    MW --> BIND[bind_execution_metadata]
+    BIND --> TOOLS[Existing Hermes tools]
+    TOOLS --> MEM[memory write gate]
+    TOOLS --> SKILL[skill write gate]
+    MEM --> WA[evaluate_gate / stage_write]
+    SKILL --> WA
 ```
 
-## Function Map
+## Function-Level Changes
 
-| Area | Hermes function | Current role | ROKA adjustment | Impact |
-| --- | --- | --- | --- | --- |
-| Turn setup | `agent.turn_context.build_turn_context(...)` | Builds per-turn prompt/context, loads memory, handles preflight setup. | Add or pass an immutable execution-brief block as turn-scoped context. | Prompt content, memory recall, compaction behavior. Must preserve prompt-cache assumptions. |
-| Turn setup | `agent.turn_context.consume_gateway_turn_context_notes(...)` | Pulls gateway-provided per-turn context notes. | Possible insertion point for gateway-origin execution brief notes. | Gateway sessions only; avoid changing cached system prompt. |
-| Turn completion | `agent.turn_finalizer.finalize_turn(...)` | Finalizes response, syncs memory providers, decides whether background review should spawn. | Attach brief/session metadata to review spawn; classify review eligibility by brief policy. | Background review timing, memory sync, visible user response unaffected if done carefully. |
-| Background review | `agent.background_review.load_background_review_settings()` | Reads `auxiliary.background_review` config and enabled state. | Add ROKA profile defaults or policy interpretation without changing global default unexpectedly. | Config behavior; low code risk if additive. |
-| Background review | `agent.background_review._resolve_review_runtime(...)` | Selects model/provider for review fork. | Record `model_provider` and `model` into review metadata for reproducibility. | Review cost/routing; no behavior change required. |
-| Background review | `agent.background_review._digest_history(...)` | Produces shorter replay for routed review models. | Ensure execution brief survives digest or is reattached explicitly. | Review quality when using a different model. |
-| Background review | `agent.background_review._run_review_in_thread(...)` | Creates forked `AIAgent`, disables DB persistence, whitelists memory/skill tools. | Add `brief_id`, `agent_session_id`, `agent_role=background_reviewer`; enforce write metadata. | Session isolation, approval staging, prompt cache. High-value adjustment point. |
-| Background review | `agent.background_review.spawn_background_review_thread(...)` | Chooses memory/skill/combined review prompt and starts review thread. | Replace aggressive skill-learning prompt with risk-classified learning prompt. | Skill creation frequency, reproducibility. No new subsystem needed. |
-| Background review | `agent.background_review.build_memory_write_metadata(...)` | Builds provenance for external memory-provider mirrors. | Extend metadata with `brief_id`, `agent_session_id`, `agent_role`, `risk_class`, `evidence_refs`. | External memory mirrors and audit. Additive if keys are optional. |
-| Background review | `agent.background_review.summarize_background_review_actions(...)` | Surfaces memory/skill actions after review. | Include staged/proposed learning status and risk class in summaries. | User visibility. Low runtime risk. |
-| Approval | `tools.write_approval.write_approval_enabled(...)` | Reads `memory.write_approval` or `skills.write_approval`; default false. | ROKA profile should turn on at least `skills.write_approval`. | Policy/config. Avoid hard-forcing unless user chooses. |
-| Approval | `tools.write_approval.evaluate_gate(...)` | Decides allow, stage, or block. | Prefer reuse; later add origin-sensitive policy only if boolean gate is insufficient. | Memory/skill persistence. Central gate, must test. |
-| Approval | `tools.write_approval.stage_write(...)` | Writes pending records under `<HERMES_HOME>/pending/...`. | Add optional execution-brief/session metadata to pending records. | Pending UI/CLI compatibility. Should be additive. |
-| Memory | `tools.memory_tool.memory_tool(...)` | Main memory tool entrypoint. | Avoid first-pass changes except ensuring metadata path remains available after staged writes. | User profile and memory persistence. |
-| Memory | `tools.memory_tool._apply_write_gate(...)` | Gates single memory mutations. | Later candidate for origin/risk-specific staging. | Memory write behavior. Requires tests. |
-| Memory | `tools.memory_tool._apply_batch_write_gate(...)` | Gates batch memory mutations. | Same as single gate; preserve atomic batch semantics. | Batch memory safety. |
-| Memory | `tools.memory_tool.apply_memory_pending(...)` | Applies approved pending memory write. | Ensure pending metadata is audit-only and does not alter replay payload. | Approval replay. |
-| External memory | `agent.memory_manager.prefetch_all(...)` | Retrieves external memory before model call. | Keep read-only; possibly pass `brief_id` only if provider can isolate by session. | Context recall. Risk if providers treat metadata as new namespace. |
-| External memory | `agent.memory_manager.sync_all(...)` | Asynchronously syncs completed turns to providers. | Child/reviewer agents should either not sync or sync under isolated `agent_session_id`. | Reproducibility and cross-agent contamination. |
-| External memory | `agent.memory_manager.notify_memory_tool_write(...)` | Mirrors committed built-in memory writes externally. | Use extended metadata from `build_memory_write_metadata(...)`. | External provider audit. |
-| Skill write | `tools.skill_manager_tool.skill_manage(...)` | Main skill mutation entrypoint. | Reuse existing gate; add metadata to staged payloads if present. | Skill persistence, sync push, ledger. |
-| Skill write | `tools.skill_manager_tool._apply_skill_write_gate(...)` | Stages skill writes when `skills.write_approval` is enabled. | Include execution-brief/session metadata in pending skill records. | Pending approval. High-value low-scope patch. |
-| Skill guard | `tools.skill_manager_tool._background_review_write_guard(...)` | Blocks autonomous edits to protected/non-curator-managed skills. | Keep. ROKA should document this as inherited protection. | Prevents silent mutation of user-owned/protected skills. |
-| Skill guard | `tools.skill_manager_tool._background_review_read_before_write_guard(...)` | Requires review fork to read target before writing. | Keep. Could add risk classification requirement later. | Prevents inferred patches. |
-| Skill write | `tools.skill_manager_tool._create_skill(...)` | Creates new local skill. | Under ROKA, background-created skills should usually stage/propose. | New durable behavior. Requires approval policy. |
-| Skill write | `tools.skill_manager_tool._patch_skill(...)` | Targeted patch to skill/support file. | Keep as preferred mutation once approved. | Future agent behavior changes. |
-| Skill write | `tools.skill_manager_tool._edit_skill(...)` | Full rewrite of `SKILL.md`. | Treat as high-risk proposal unless foreground user-directed. | High blast radius. |
-| Skill write | `tools.skill_manager_tool._write_file(...)` | Adds or overwrites skill support file. | Stage when background or reviewer-origin; auto-allow only low-risk evidence files if policy allows. | Skill library behavior and artifacts. |
-| Skill audit | `tools.skill_ledger.record_mutation(...)` | Append-only audit after mutation. | Add brief/session metadata if function already accepts evidence or can carry extended evidence. | Audit only. Should not become a gate. |
-| Delegation | `tools.delegate_tool.delegate_task(...)` | Spawns one or more isolated subagents. | Map Execution Brief into `goal`, `context`, `tasks[]`, and possibly hidden metadata. | Orchestration behavior and child sessions. |
-| Delegation | `tools.delegate_tool._build_child_agent(...)` | Constructs child `AIAgent` with inherited runtime/toolsets. | Ensure each child has unique `agent_session_id` and shared `brief_id`. | Session isolation, provider/model selection. |
-| Delegation | `tools.delegate_tool._run_single_child(...)` | Runs a child task and captures result. | Require structured output with findings/evidence/deviation report. | Parent aggregation quality. |
-| Delegation | `tools.delegate_tool._finalize_child_results(...)` | Aggregates child results into parent result. | Merge summaries and evidence only; never merge mutable histories. | Parent context size and determinism. |
-| Delegation | `tools.delegate_tool._validate_batch_tasks(...)` | Validates batch fan-out quality. | Add execution-brief completeness checks for batch reviewer roles. | Prevents malformed multi-agent orchestration. |
-| Lifecycle | `agent.subagent_lifecycle.SubagentLaunchRequest` | Structured launch request with `goal`, `context`, `metadata`. | Preferred place to carry `brief_id`, `agent_role`, risk policy, and constraints without new core schema. | Additive. Metadata limit is 8192 bytes. |
-| Lifecycle | `agent.subagent_lifecycle.SubagentLifecycleService.launch(...)` | Validates and launches subagent lifecycle records. | Ensure metadata validation permits ROKA keys and records session linkage. | Session tracking. |
-| Lifecycle | `agent.subagent_lifecycle.SubagentLifecycleService.result(...)` | Returns structured child result. | Surface result hash, evidence, and deviation report to orchestrator. | Review and reproducibility. |
+| Surface | Function or object | Implemented adjustment | Direct impact |
+| --- | --- | --- | --- |
+| Defaults | `hermes_cli.config_defaults.DEFAULT_CONFIG["moa"]` | Adds the `roka` preset and makes it the fork's one-shot MoA default. | Fresh and merged configs expose four default model routes. Plain non-MoA sessions are unchanged. |
+| One-shot entry | `cli.HermesCLI.handle_command(...)`, `gateway.run.GatewayRunner._handle_message(...)` | Temporarily selects the virtual `provider=moa` ROKA preset, including when no user MoA block loaded. | CLI and messaging-platform `/moa` requests use the real control facade rather than the legacy context helper. |
+| Legacy guard | `agent.conversation_loop.run_conversation(...)`, `reject_legacy_roka_execution(...)` | Rejects `control_mode: roka` on the old `moa_config` context-only contract. | A weaker three-reference synthesis cannot present itself as ROKA. Generic legacy MoA remains compatible. |
+| Config parsing | `hermes_cli.moa_config._clean_slot(...)` | Preserves a known `advisor_role`. | Role identity survives config normalization. |
+| Config validation | `_slot_problem(...)`, `validate_moa_payload(...)` | Reject unknown modes/roles and require exactly three enabled unique roles. | Dashboard/CLI config writes cannot save a falsely complete ROKA preset. |
+| Config reads | `_normalize_preset(...)` | Preserves `control_mode: roka`. | Runtime can distinguish ROKA from generic MoA. |
+| CLI config | `hermes_cli.moa_cmd.cmd_moa(...)` | Treats ROKA references as three fixed role slots and validates before saving. | Interactive reconfiguration can change routes without losing role identity. |
+| Web schema | `MoaModelSlot`, `MoaPresetPayload`, `MoaConfigPayload` | Round-trips `advisor_role` and `control_mode`. | Dashboard saves cannot strip the ROKA contract. |
+| Web editor | `web/src/pages/ModelsPage.tsx` | Shows advisor roles and fixes the three-slot shape while allowing model replacement. | Users cannot accidentally disable/add/remove a required ROKA role in the UI. |
+| Desktop editor | `apps/desktop/src/app/settings/model-settings.tsx` | Applies the same fixed-role controls and preserves role/mode types. | Electron users get the same ROKA configuration contract instead of a rejected autosave. |
+| Brief model | `agent.roka_control.ExecutionBrief` | Frozen turn-scoped task, purpose, constraints, assumptions, deviation, autonomy, and review policy. | One semantic contract is reused throughout a user turn. |
+| Brief identity | `build_brief_id(...)`, `resolve_prompt_cache_scope_safe(...)` | Uses the live turn ID plus the compression-lineage root session, with a deterministic message-prefix fallback for direct callers. | Tool iterations and in-turn transcript compression keep one ID; a new user turn gets a new ID. |
+| Agent identity | `build_agent_session_id(...)` | Derives stable role/provider/model-specific logical IDs. | Four roles cannot share an audit identity. |
+| Brief parsing | `parse_execution_brief(...)` | Requires the complete brief shape, clips fields, adds mandatory constraints, falls back conservatively, and re-renders accepted input canonically. | Empty/partial/failed intent output cannot masquerade as a successful compilation; extra raw intent prose does not become executor advice. |
+| Advisor prompts | `advisor_system_prompt(...)` | Adds role, logical session, and brief ID to every advisor; reviewers also receive the exact compiled brief. | Intent runs first; both reviewers receive the same immutable brief. |
+| MoA call order | `MoAChatCompletions.prepare(...)`, `create(...)` | Runs intent once per user turn, then two reviewers per configured cadence, then the aggregator. The agent loop separately passes the clean pre-injection request for conservative fallback compilation. | First iteration is four model calls; later `per_iteration` loops are two reviewer calls plus executor, and failed intent compilation cannot turn injected retrieval text into the user's task. |
+| MoA reference call | `_run_reference(...)`, `_run_references_parallel(...)` | Uses role-specific prompts and deep-copied per-call message objects. | Provider adapters cannot mutate another role's logical context; mixed routes still use Hermes routing. |
+| Route accounting | `_resolved_route(...)`, `call_llm(..., route_info=...)` | Compares the configured slot with the provider/model that actually served the call. | Advisor labels/cost and executor provenance do not falsely attribute fallback output to the configured model. |
+| Direct-worker fallback | `agent.chat_completion_helpers.try_activate_fallback(...)`, `update_execution_route_for_agent(...)` | Updates bound ROKA route provenance after a direct background-review worker changes provider/model. | A learning proposal cannot retain the pre-fallback model label after another model actually issued it. |
+| Executor context | `MoAChatCompletions.create(...)` guidance assembly | Appends the canonical brief, executor session, failed-role state, and the two reviewer findings at the prompt tail. | Prompt-cache prefix stays stable while raw intent-model prose cannot rewrite the compiled brief. |
+| Accounting | `_accounting_without_usage(...)` | Reuses intent evidence without charging its tokens on later tool iterations and labels it `[cached]`. | Session cost includes the real intent call once, and observability does not imply a second call. |
+| Agent state | `apply_execution_brief_to_agent(...)` | Attaches brief/session/role/model provenance to the existing `AIAgent`. | Tool middleware and background review can read one identity source. |
+| Mode exit | `clear_execution_brief_from_agent(...)`, `agent.agent_runtime_helpers.switch_model(...)` | Clears ROKA state after a successful switch away from provider `moa`. | A prior brief cannot govern a later plain-model session. |
+| Outer fallback | `agent.chat_completion_helpers.try_activate_fallback(...)` | Refuses an agent-level fallback while the acting route is the ROKA MoA facade. | An executor failure cannot silently turn later iterations into one direct model with no reviewers. Role-level `call_llm` fallback remains available and attributable. |
+| Tool boundary | `agent.tool_executor._run_agent_tool_execution_middleware(...)` | Binds execution metadata around the actual dispatch callback and blocks new ROKA `delegate_task` spawns. | Sequential and concurrent tools receive the same context; no unbriefed child executor can bypass the four-role v0.1 topology. |
+| Executor tools | `_call_prepared_aggregator(...)` | Removes `delegate_task` from the ROKA executor schema. | The acting model is not invited to create a child that lacks brief/approval inheritance. |
+| Approval policy | `tools.write_approval.evaluate_gate(...)` | Treats bound ROKA context as approval enabled for memory and skills. | Global Hermes compatibility defaults can remain off outside ROKA mode. |
+| Pending persistence | `stage_write(...)` | Treats dispatch-bound provenance as authoritative over caller audit hints, adds risk/origin, writes atomically, and raises on failure. | A nested helper cannot relabel the active brief/role/route, and a tool cannot report a nonexistent pending record as staged. |
+| Pending lookup | `_pending_path(...)`, `get_pending(...)`, `discard_pending(...)` | Uses full UUID entropy and accepts only bounded hexadecimal record IDs. | Collision risk is not artificially reduced to 32 bits, and path traversal is rejected. |
+| Memory | `tools.memory_tool._apply_write_gate(...)`, `_apply_batch_write_gate(...)` | Reuses the gate and converts gate-load or persistence failure into a failed ROKA tool result. | No ROKA memory mutation occurs when approval cannot be enforced. |
+| Skills | `_skill_execution_metadata(...)`, `_apply_skill_write_gate(...)` | Carries current brief metadata into existing skill proposals and fails visibly when approval cannot be enforced. | No new mutation path or tool schema is introduced. |
+| Learning prompt | `_MEMORY_REVIEW_PROMPT`, `_SKILL_REVIEW_PROMPT`, `_COMBINED_REVIEW_PROMPT` | Requires durable evidence and makes no-op review normal. | Removes the upstream pressure to manufacture a skill update. |
+| Review snapshot | `spawn_background_review_thread(...)` | Captures brief, parent session, and executor route before launching the thread. | A delayed review cannot inherit the next foreground turn's brief. |
+| Review routing | `_resolve_review_runtime(...)` | Routes a ROKA review directly to the real executor model, overriding any pre-existing auxiliary review route. | Background review cannot recursively launch another MoA through `auxiliary.background_review`. |
+| Review agent | `_run_review_in_thread(...)` | Applies the captured brief and a unique `background_reviewer` logical ID. | Existing DB/external-memory isolation remains intact and learning is attributable. |
+| Review notification | `summarize_background_review_actions(...)` | Recognizes staged proposals and reports their pending IDs. | A successful background staging action is not silently hidden as “nothing changed.” |
+| Memory mirror | `build_memory_write_metadata(...)` | Merges common ROKA provenance and defaults ROKA learning to approval-required risk. | External memory notifications use the same identity as built-in pending records. |
 
-## Proposed ROKA Change Sequence
+## Compatibility Boundaries
 
-### Phase 1: Documentation And Policy
+The implementation deliberately does not change:
 
-- Add this function map.
-- Keep ROKA language aligned with Hermes terms: execution brief, review,
-  learning, session, metadata, approval.
-- Do not rename product surfaces yet.
+- global model tool schemas (ROKA filters delegation request-locally);
+- the generic MoA preset contract;
+- memory or skill replay payloads;
+- session database schema;
+- external memory prefetch/sync behavior;
+- Hermes guardrails, plugin hooks, or relay dispatch;
+- upstream website assets and package/import names.
 
-### Phase 2: Metadata-Only Runtime Patch
+The only new core module is `agent/roka_control.py`; orchestration, routing,
+parallelism, tools, and pending storage remain Hermes-owned.
 
-Smallest likely code changes:
+## Failure Behavior
 
-- Extend `build_memory_write_metadata(...)` with optional ROKA keys.
-- Extend `write_approval.stage_write(...)` to persist optional metadata.
-- Extend `skill_manage(...)` or `_apply_skill_write_gate(...)` so staged skill
-  writes carry the same metadata.
+| Failure | Runtime result |
+| --- | --- |
+| Intent advisor unavailable or malformed | Conservative fallback brief; failed role is visible. |
+| One reviewer unavailable | Executor receives the surviving review plus a loud failed-role label. |
+| Duplicate or invalid hand-edited role | Invalid slot is not called and is emitted as failed degraded state. |
+| Unknown hand-edited `control_mode` | The turn fails before any model call instead of silently becoming generic MoA. |
+| Advisor or executor provider-level fallback | Configured and actual routes are both retained; accounting/provenance use the actual route. |
+| Direct background-review fallback | The review keeps ROKA approval context and updates provenance to the actual provider/model. |
+| All advisors unavailable | Executor receives the fallback brief and explicit degraded state. |
+| ROKA preset is disabled but explicitly selected | The turn fails before any model call; the executor cannot run alone under a ROKA preset name. |
+| Executor unavailable after its provider-level fallback chain | The turn fails; the outer fallback is refused because replacing `provider=moa` would bypass the control facade. |
+| ROKA sent through legacy `moa_config` | The turn fails before execution and directs the caller to the virtual MoA provider path. |
+| Executor requests new delegation | Tool is absent from the schema; a forged spawn call is blocked by middleware. |
+| Pending record cannot be written | Memory/skill tool returns failure; no durable write occurs. |
+| Approval module unavailable during a ROKA write | Memory/skill tool fails closed; generic Hermes retains its compatibility behavior. |
+| Invalid pending ID | Lookup returns no record and discard returns false. |
+| Switch away from ROKA | Brief and logical role state are cleared. |
 
-Expected impact:
+## Required Regression Areas
 
-- No tool schema change if metadata is built internally.
-- Pending records become richer.
-- Existing approvals still replay the same payload.
+Changes to any function above must run the canonical test runner over:
 
-### Phase 3: Background Review Prompt Patch
+- `tests/agent/test_roka_*.py`
+- `tests/agent/test_moa_*.py`
+- `tests/run_agent/test_moa_*.py`
+- `tests/agent/test_background_review*.py`
+- `tests/run_agent/test_background_review*.py`
+- `tests/tools/test_write_approval.py`
+- `tests/hermes_cli/test_moa_config.py`
+- `tests/cli/test_moa_command.py`
+- `tests/e2e/test_platform_commands.py`
 
-Smallest likely code changes:
-
-- Adjust `_SKILL_REVIEW_PROMPT` and `_COMBINED_REVIEW_PROMPT`.
-- Require risk classification before memory/skill writes.
-- Normalize "Nothing to save" as acceptable when no durable learning exists.
-
-Expected impact:
-
-- Fewer silent skill changes.
-- Less nondeterministic behavior across repeated tasks.
-- Needs tests around prompt text and staged writes.
-
-### Phase 4: Delegation Contract Patch
-
-Smallest likely code changes:
-
-- Add an execution-brief renderer that maps fields into existing
-  `delegate_task(goal=..., context=..., tasks=[...])`.
-- Use `SubagentLaunchRequest.metadata` where available.
-- Keep each child transcript isolated.
-
-Expected impact:
-
-- No new orchestration engine needed at first.
-- ROKA can run executor/reviewer/policy roles using existing child sessions.
-
-## Impact Checklist
-
-Any code change touching these functions must answer:
-
-- Does it alter the cached system prompt?
-- Does it alter model tool schemas?
-- Does it alter session persistence or session lineage?
-- Does it alter default write behavior for memory or skills?
-- Does it alter approval/pending replay compatibility?
-- Does it alter external memory provider sync?
-- Does it allow two agents to share one mutable conversation history?
-
-If any answer is yes, write a task implementation plan before patching code.
-
-## First Recommended Code Target
-
-The first code target should be metadata-only:
-
-1. Add a helper that builds ROKA execution metadata from the current agent.
-2. Thread that metadata into memory-write metadata and pending skill records.
-3. Add tests proving old pending records still replay.
-
-This gives ROKA observability and traceability before changing model behavior.
+See `mydocs/working/roka-v0.1-final.md` for the release run.

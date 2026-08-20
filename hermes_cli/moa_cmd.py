@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.roka_control import ROKA_ADVISOR_ROLES, ROKA_CONTROL_MODE
 from hermes_cli.config import load_config, save_config
 from hermes_cli.inventory import build_models_payload, load_picker_context
-from hermes_cli.moa_config import DEFAULT_MOA_PRESET_NAME, normalize_moa_config
+from hermes_cli.moa_config import (
+    DEFAULT_MOA_PRESET_NAME,
+    normalize_moa_config,
+    validate_moa_payload,
+)
 
 
 def _prompt_choice(title: str, rows: list[str], default: int = 0) -> int:
@@ -71,7 +76,12 @@ def _pick_slot(current: dict[str, str] | None = None) -> dict[str, str]:
 
 def _format_slot(slot: dict[str, Any]) -> str:
     label = f"{slot['provider']}:{slot['model']}"
+    role = str(slot.get("advisor_role") or "").strip()
     effort = str(slot.get("reasoning_effort") or "").strip()
+    if role and effort:
+        return f"{label} [role={role}, reasoning={effort}]"
+    if role:
+        return f"{label} [role={role}]"
     return f"{label} [reasoning={effort}]" if effort else label
 
 
@@ -84,6 +94,8 @@ def _print_config(config: dict[str, Any]) -> None:
     for name, preset in cfg["presets"].items():
         marker = "*" if name == cfg["default_preset"] else " "
         print(f"\n{marker} {name}")
+        if preset.get("control_mode"):
+            print(f"  Control mode: {preset['control_mode']}")
         print("  Reference models:")
         for idx, slot in enumerate(preset["reference_models"], start=1):
             print(f"    {idx}. {_format_slot(slot)}")
@@ -105,25 +117,42 @@ def cmd_moa(args) -> None:
         preset_name = (getattr(args, "name", None) or moa.get("default_preset") or DEFAULT_MOA_PRESET_NAME).strip()
         current = moa["presets"].get(preset_name, moa["presets"][moa["default_preset"]])
         print(f"Configure MoA preset: {preset_name}")
-        print("Pick at least one reference model; choose Done when finished.")
         refs: list[dict[str, str]] = []
         existing = list(current.get("reference_models") or [])
-        idx = 0
-        while True:
-            base = existing[idx] if idx < len(existing) else None
-            picked = _pick_slot(base)
-            picked["enabled"] = bool((base or {}).get("enabled", True))
-            refs.append(picked)
-            idx += 1
-            choice = _prompt_choice("Add another reference model?", ["Add another", "Done"], 1)
-            if choice == 1:
-                break
+        if current.get("control_mode") == ROKA_CONTROL_MODE:
+            print("Pick one model for each required ROKA advisor role.")
+            existing_by_role = {
+                str(slot.get("advisor_role") or ""): slot for slot in existing
+            }
+            for role in ROKA_ADVISOR_ROLES:
+                print(f"Configure advisor role: {role}")
+                picked = _pick_slot(existing_by_role.get(role))
+                picked["advisor_role"] = role
+                picked["enabled"] = True
+                refs.append(picked)
+        else:
+            print("Pick at least one reference model; choose Done when finished.")
+            idx = 0
+            while True:
+                base = existing[idx] if idx < len(existing) else None
+                picked = _pick_slot(base)
+                picked["enabled"] = bool((base or {}).get("enabled", True))
+                refs.append(picked)
+                idx += 1
+                choice = _prompt_choice(
+                    "Add another reference model?", ["Add another", "Done"], 1
+                )
+                if choice == 1:
+                    break
         print("Configure aggregator model.")
         current = dict(current)
         current["reference_models"] = refs
         current["aggregator"] = _pick_slot(current.get("aggregator"))
         moa["presets"][preset_name] = current
         moa.setdefault("default_preset", preset_name)
+        problems = validate_moa_payload(moa)
+        if problems:
+            raise RuntimeError("Invalid MoA config: " + "; ".join(problems))
         cfg["moa"] = normalize_moa_config(moa)
         save_config(cfg)
         print(f"Saved MoA preset: {preset_name}")

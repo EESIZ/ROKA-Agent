@@ -7146,6 +7146,7 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
 
         def _preset_dict(preset: MoaPresetPayload) -> dict:
             return {
+                "control_mode": preset.control_mode,
                 "reference_models": [_slot_dict(slot) for slot in preset.reference_models],
                 "aggregator": _slot_dict(preset.aggregator),
                 "reference_temperature": preset.reference_temperature,
@@ -7169,6 +7170,7 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
             else:
                 raw = _preset_dict(
                     MoaPresetPayload(
+                        control_mode=body.control_mode,
                         reference_models=body.reference_models,
                         aggregator=body.aggregator,
                         reference_temperature=body.reference_temperature,

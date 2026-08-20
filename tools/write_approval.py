@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 MEMORY = "memory"
 SKILLS = "skills"
 _SUBSYSTEMS = (MEMORY, SKILLS)
+_PENDING_ID_RE = re.compile(r"\A[a-f0-9]{8,64}\Z", re.IGNORECASE)
 
 # Config key (per subsystem). A single boolean: the approval gate is OFF by
 # default (writes flow freely, the pre-gate behaviour), and ON means stage /
@@ -65,6 +67,10 @@ _SUBSYSTEMS = (MEMORY, SKILLS)
 # "block all writes" state — to disable a subsystem entirely use its own
 # enable flag (e.g. ``memory.memory_enabled: false``).
 CONFIG_KEY = "write_approval"
+
+
+class PendingWritePersistenceError(RuntimeError):
+    """Raised when an approval-gated write could not be atomically staged."""
 
 
 def _metadata_value_present(value: Any) -> bool:
@@ -112,7 +118,15 @@ def _normalize_enabled(value: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 def _pending_dir(subsystem: str) -> Path:
+    if subsystem not in _SUBSYSTEMS:
+        raise ValueError(f"Unknown pending-write subsystem: {subsystem!r}")
     return get_hermes_home() / "pending" / subsystem
+
+
+def _pending_path(subsystem: str, pending_id: str) -> Optional[Path]:
+    if not _PENDING_ID_RE.fullmatch(str(pending_id or "")):
+        return None
+    return _pending_dir(subsystem) / f"{pending_id}.json"
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any],
@@ -133,11 +147,13 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
             exists. It is audit-only and must not be required to replay the
             payload when approved.
 
-    Returns a dict with ``id`` and metadata. Best-effort: on disk failure it
-    logs and still returns a record (the write is simply lost, which is the
-    safe failure for an approval gate — nothing is silently committed).
+    Returns a dict with ``id`` and metadata. Persistence is fail-closed: an
+    exception is raised if the pending record cannot be written, so callers
+    cannot report a staged write that does not exist.
     """
-    pid = uuid.uuid4().hex[:8]
+    if subsystem not in _SUBSYSTEMS:
+        raise ValueError(f"Unknown pending-write subsystem: {subsystem!r}")
+    pid = uuid.uuid4().hex
     record = {
         "id": pid,
         "subsystem": subsystem,
@@ -147,10 +163,39 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
         "created_at": time.time(),
         "payload": payload,
     }
+    try:
+        from agent.roka_control import current_execution_metadata
+
+        bound_metadata = current_execution_metadata()
+    except Exception:
+        bound_metadata = {}
+    merged_metadata: Dict[str, Any] = {}
     if metadata:
-        clean_metadata = {k: v for k, v in metadata.items() if _metadata_value_present(v)}
+        merged_metadata.update(
+            key_value
+            for key_value in metadata.items()
+            if _metadata_value_present(key_value[1])
+        )
+    # Dispatch-bound metadata is the observation of what actually executed.
+    # Treat it as authoritative over caller-supplied audit hints so a nested
+    # memory/skill helper cannot relabel the active brief, role, or route.
+    merged_metadata.update(
+        key_value
+        for key_value in bound_metadata.items()
+        if _metadata_value_present(key_value[1])
+    )
+    if merged_metadata.get("control_mode") == "roka":
+        merged_metadata.setdefault("risk_class", "approval_required")
+        merged_metadata.setdefault("learning_origin", origin or "foreground")
+    elif (origin or "") == "background_review":
+        merged_metadata.setdefault("learning_origin", "background_review")
+    if merged_metadata:
+        clean_metadata = {
+            k: v for k, v in merged_metadata.items() if _metadata_value_present(v)
+        }
         if clean_metadata:
             record["metadata"] = clean_metadata
+    tmp: Optional[Path] = None
     try:
         d = _pending_dir(subsystem)
         d.mkdir(parents=True, exist_ok=True)
@@ -158,8 +203,16 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
-    except Exception as e:  # pragma: no cover - disk failure path
+    except Exception as e:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         logger.error("Failed to stage pending %s write: %s", subsystem, e, exc_info=True)
+        raise PendingWritePersistenceError(
+            f"Could not stage pending {subsystem} write"
+        ) from e
     return record
 
 
@@ -180,7 +233,9 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
-    path = _pending_dir(subsystem) / f"{pending_id}.json"
+    path = _pending_path(subsystem, pending_id)
+    if path is None:
+        return None
     if not path.exists():
         return None
     try:
@@ -191,7 +246,9 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
 
 def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
-    path = _pending_dir(subsystem) / f"{pending_id}.json"
+    path = _pending_path(subsystem, pending_id)
+    if path is None:
+        return False
     try:
         if path.exists():
             path.unlink()
@@ -283,7 +340,14 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "",
     delays a write for approval, never silently refuses it. ``blocked`` is
     still produced when the user *actively denies* an inline prompt.
     """
-    if not write_approval_enabled(subsystem):
+    try:
+        from agent.roka_control import current_execution_metadata
+
+        roka_active = current_execution_metadata().get("control_mode") == "roka"
+    except Exception:
+        roka_active = False
+
+    if not roka_active and not write_approval_enabled(subsystem):
         return GateDecision(allow=True)
 
     background = is_background()
@@ -292,10 +356,15 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "",
     # background skill write happens in a daemon thread with no user present.
     if subsystem == SKILLS or background:
         where = "/skills pending" if subsystem == SKILLS else "/memory pending"
+        reason = (
+            "ROKA control is active"
+            if roka_active
+            else f"{subsystem}.write_approval is on"
+        )
         return GateDecision(
             stage=True,
             message=(
-                f"Staged for approval ({subsystem}.write_approval is on). "
+                f"Staged for approval ({reason}). "
                 f"Not yet saved — review with {where}."
             ),
         )
@@ -318,7 +387,9 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "",
     return GateDecision(
         stage=True,
         message=(
-            "Staged for approval (memory.write_approval is on). "
+            "Staged for approval ("
+            + ("ROKA control is active" if roka_active else "memory.write_approval is on")
+            + "). "
             "Not yet saved — review with /memory pending."
         ),
     )

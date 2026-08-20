@@ -2436,6 +2436,22 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     auth resolution and client construction — no duplicated provider→key
     mappings.
     """
+    if (
+        getattr(agent, "_roka_control_mode", "") == "roka"
+        and getattr(agent, "provider", "") == "moa"
+    ):
+        # A normal outer fallback replaces the virtual MoA facade with one
+        # direct model. The already-compiled brief may remain in memory, but
+        # later tool iterations would no longer run the independent reviewers.
+        # That is weaker behavior presented under the same ROKA identity, so
+        # fail closed. The aggregator's own call_llm route may still use its
+        # normal provider-level fallback and records that actual route.
+        logger.error(
+            "ROKA blocked outer agent fallback because it would bypass the "
+            "MoA control facade"
+        )
+        return False
+
     if reason in {FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit}:
         # Only start cooldown when leaving the primary provider.  If we're
         # already on a fallback and chain-switching, the primary wasn't the
@@ -2828,6 +2844,18 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
         )
+        # ROKA background review runs on the acting executor's direct route,
+        # not through the MoA facade. If that direct worker falls back, keep
+        # its approval provenance tied to the provider/model that will
+        # actually issue any subsequent tool call.
+        if getattr(agent, "_roka_control_mode", "") == "roka":
+            from agent.roka_control import update_execution_route_for_agent
+
+            update_execution_route_for_agent(
+                agent,
+                provider=fb_provider,
+                model=fb_model,
+            )
         # Reset the stale-call circuit breaker (#58962): the streak measured
         # the OLD provider's unresponsiveness.  Carrying it over would
         # short-circuit the freshly activated fallback before it gets a

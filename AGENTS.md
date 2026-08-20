@@ -4,6 +4,37 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## ROKA Fork Runtime Contract
+
+This fork adds an intent-preserving control mode on top of Hermes. Treat the
+following as release invariants, not optional prompt style:
+
+- A normal user message is compiled into one execution brief per user turn.
+- The brief is immutable through later tool iterations and background review.
+- `intent_analyst`, `constraint_reviewer`, and `verification_reviewer` use
+  separate message histories and logical session IDs.
+- Advisor calls receive no tools. The MoA aggregator is the only executor.
+- The exact brief ID and role/session provenance reach every executor tool call.
+- Memory and skill mutations in ROKA mode use Hermes' existing approval store;
+  no call may report `staged` unless the pending record was atomically persisted.
+- Background learning is evidence-gated. `Nothing to save.` is a successful
+  result, and review must not recursively launch another ROKA MoA.
+- Missing roles or failed advisors are visible degraded state. Never silently
+  relabel a model or claim that a review ran when it did not.
+- If Hermes falls back to another provider/model, record the actual route in
+  labels, accounting, traces, and executor provenance.
+- A ROKA request must enter through the virtual `provider=moa` facade. Reject
+  the legacy context-only `moa_config` path, and do not let an outer fallback
+  replace the facade with a direct model during the controlled turn.
+- The v0.1 ROKA executor must not spawn a new `delegate_task` child. Re-enable
+  delegation only after the child inherits the same brief and approval policy.
+- Generic Hermes behavior remains compatible when `control_mode` is not `roka`.
+
+Reuse the existing MoA, tool middleware, background review, memory, skill, and
+approval functions before adding a subsystem. Any change to this contract needs
+behavior tests through `scripts/run_tests.sh` and matching updates to the ROKA
+README, function map, and release evidence.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a

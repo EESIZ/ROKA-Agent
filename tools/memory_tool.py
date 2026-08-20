@@ -930,8 +930,18 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
     try:
         from tools import write_approval as wa
     except Exception:
-        # If the gate module can't load, fail open (current behaviour) rather
-        # than blocking all memory writes.
+        try:
+            from agent.roka_control import is_roka_execution_active
+
+            if is_roka_execution_active():
+                return tool_error(
+                    "ROKA memory write blocked: the approval gate is unavailable.",
+                    success=False,
+                )
+        except Exception:
+            pass
+        # Preserve upstream behavior outside ROKA so an optional gate import
+        # failure does not disable generic Hermes memory writes.
         return None
 
     # Build a small inline summary/detail for the foreground approval prompt.
@@ -961,13 +971,20 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
         "content": content,
         "old_text": old_text,
     }
-    record = wa.stage_write(
-        wa.MEMORY, payload,
-        summary=f"{summary}: {detail[:120]}",
-        origin=wa.current_origin(),
-    )
+    try:
+        record = wa.stage_write(
+            wa.MEMORY, payload,
+            summary=f"{summary}: {detail[:120]}",
+            origin=wa.current_origin(),
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Memory write was neither saved nor staged: {exc}",
+            success=False,
+        )
     return json.dumps(
-        {"success": True, "staged": True, "pending_id": record["id"],
+        {"success": True, "saved": False, "staged": True,
+         "requires_approval": True, "pending_id": record["id"],
          "message": decision.message},
         ensure_ascii=False,
     )
@@ -983,6 +1000,16 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
     try:
         from tools import write_approval as wa
     except Exception:
+        try:
+            from agent.roka_control import is_roka_execution_active
+
+            if is_roka_execution_active():
+                return tool_error(
+                    "ROKA memory write blocked: the approval gate is unavailable.",
+                    success=False,
+                )
+        except Exception:
+            pass
         return None
 
     label = "user profile" if target == "user" else "memory"
@@ -1009,13 +1036,20 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
         return tool_error(decision.message, success=False)
 
     payload = {"action": "batch", "target": target, "operations": operations}
-    record = wa.stage_write(
-        wa.MEMORY, payload,
-        summary=f"{summary}: {detail[:120]}",
-        origin=wa.current_origin(),
-    )
+    try:
+        record = wa.stage_write(
+            wa.MEMORY, payload,
+            summary=f"{summary}: {detail[:120]}",
+            origin=wa.current_origin(),
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Memory write was neither saved nor staged: {exc}",
+            success=False,
+        )
     return json.dumps(
-        {"success": True, "staged": True, "pending_id": record["id"],
+        {"success": True, "saved": False, "staged": True,
+         "requires_approval": True, "pending_id": record["id"],
          "message": decision.message},
         ensure_ascii=False,
     )
@@ -1261,7 +1295,4 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
-
 

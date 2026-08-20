@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -500,6 +500,55 @@ describe('ModelSettings MoA preset editor', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps ROKA advisor roles fixed while allowing model selection', async () => {
+    const base = moaConfig()
+
+    const config = {
+      ...base,
+      control_mode: 'roka' as const,
+      presets: {
+        ...base.presets,
+        default: {
+          ...base.presets.default,
+          control_mode: 'roka' as const,
+          reference_models: [
+            {
+              provider: 'nous',
+              model: 'hermes-4',
+              advisor_role: 'intent_analyst' as const
+            },
+            {
+              provider: 'openrouter',
+              model: 'deepseek/deepseek-v4-pro',
+              advisor_role: 'constraint_reviewer' as const
+            },
+            {
+              provider: 'openrouter',
+              model: 'anthropic/claude-opus-4.8',
+              advisor_role: 'verification_reviewer' as const
+            }
+          ]
+        }
+      }
+    }
+
+    getMoaModels.mockResolvedValue(config)
+
+    await renderModelSettings()
+    expect(await screen.findByText(/intent_analyst/)).toBeTruthy()
+
+    expect(screen.getByLabelText('Disable reference 1').hasAttribute('disabled')).toBe(true)
+    const addButton = screen.getByRole('button', { name: 'Add reference model' })
+    expect(addButton.hasAttribute('disabled')).toBe(true)
+    const section = addButton.closest('section')
+    expect(section).not.toBeNull()
+    expect(
+      within(section as HTMLElement)
+        .getAllByRole('button', { name: 'Remove' })
+        .every(button => button.hasAttribute('disabled'))
+    ).toBe(true)
   })
 
   it('does not clear the model or save when the same provider is re-selected', async () => {

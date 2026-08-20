@@ -80,4 +80,51 @@ class TestSetMoaModelsPreservesUndeclaredKeys:
             "trace_dir was dropped by set_moa_models"
         )
 
+    def test_roka_control_mode_and_advisor_roles_survive_gui_save(self):
+        existing_cfg = {"moa": {}}
+        saved_cfg = {}
+        payload = MoaConfigPayload(
+            default_preset="roka",
+            presets={
+                "roka": MoaPresetPayload(
+                    control_mode="roka",
+                    reference_models=[
+                        MoaModelSlot(
+                            provider="fake",
+                            model="intent",
+                            advisor_role="intent_analyst",
+                        ),
+                        MoaModelSlot(
+                            provider="fake",
+                            model="constraints",
+                            advisor_role="constraint_reviewer",
+                        ),
+                        MoaModelSlot(
+                            provider="fake",
+                            model="verification",
+                            advisor_role="verification_reviewer",
+                        ),
+                    ],
+                    aggregator=MoaModelSlot(provider="fake", model="executor"),
+                )
+            },
+        )
+
+        with (
+            patch("hermes_cli.web_server.load_config", return_value=existing_cfg),
+            patch(
+                "hermes_cli.web_server.save_config",
+                side_effect=lambda cfg: saved_cfg.update(cfg),
+            ),
+            patch("hermes_cli.web_server._profile_scope"),
+        ):
+            set_moa_models(payload)
+
+        roka = saved_cfg["moa"]["presets"]["roka"]
+        assert roka["control_mode"] == "roka"
+        assert [slot["advisor_role"] for slot in roka["reference_models"]] == [
+            "intent_analyst",
+            "constraint_reviewer",
+            "verification_reviewer",
+        ]
 

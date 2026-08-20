@@ -11817,13 +11817,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 moa_usage,
                 normalize_moa_config,
             )
+            from hermes_cli.config_defaults import DEFAULT_CONFIG
 
             parts = cmd_original.split(None, 1)
             payload = parts[1].strip() if len(parts) > 1 else ""
             if not payload:
                 _cprint(f"  {moa_usage()}")
                 return True
-            moa_cfg = self.config.get("moa") if isinstance(self.config, dict) else {}
+            moa_cfg = self.config.get("moa") if isinstance(self.config, dict) else None
+            if not isinstance(moa_cfg, dict) or not moa_cfg:
+                moa_cfg = DEFAULT_CONFIG["moa"]
             normalized = normalize_moa_config(moa_cfg)
             preset = normalized["default_preset"]
             self._pending_moa_restore_model = {

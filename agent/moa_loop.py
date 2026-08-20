@@ -8,6 +8,7 @@ iteration.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import re
@@ -19,6 +20,19 @@ from typing import Any
 
 from agent.auxiliary_client import call_llm
 from agent.message_content import flatten_message_text
+from agent.roka_control import (
+    ROKA_ADVISOR_ROLES,
+    ROKA_CONTROL_MODE,
+    ExecutionBrief,
+    advisor_system_prompt,
+    apply_execution_brief_to_agent,
+    build_agent_session_id,
+    build_brief_id,
+    clear_execution_brief_from_agent,
+    latest_user_request,
+    parse_execution_brief,
+    update_execution_route_for_agent,
+)
 from agent.transports import get_transport
 
 logger = logging.getLogger(__name__)
@@ -233,6 +247,22 @@ class _RefAccounting:
         self.provider = provider
         self.temperature = temperature
 
+
+def _accounting_without_usage(accounting: Any) -> Any:
+    """Keep trace evidence while preventing a cached call from being charged twice."""
+    if not isinstance(accounting, _RefAccounting):
+        return accounting
+    from agent.usage_pricing import CanonicalUsage
+
+    return _RefAccounting(
+        CanonicalUsage(),
+        messages=accounting.messages,
+        output=accounting.output,
+        model=accounting.model,
+        provider=accounting.provider,
+        temperature=accounting.temperature,
+    )
+
 # Per-tool-result character budget for the advisory reference view. Tool
 # results can be huge (a full diff, a 5000-line file dump); replaying them
 # verbatim per reference per tool-loop step would blow the reference model's
@@ -282,11 +312,52 @@ _REFERENCE_SYSTEM_PROMPT = (
 )
 
 
+def _reference_prompt_for_slot(
+    slot: dict[str, Any],
+    execution_brief: ExecutionBrief | None = None,
+) -> str:
+    return advisor_system_prompt(
+        _REFERENCE_SYSTEM_PROMPT,
+        role=str(slot.get("advisor_role") or ""),
+        agent_session_id=str(slot.get("_agent_session_id") or ""),
+        brief_id=str(slot.get("_brief_id") or ""),
+        execution_brief=execution_brief,
+    )
+
+
 
 def _slot_label(slot: dict[str, Any]) -> str:
     label = f"{(slot.get('provider') or '').strip()}:{(slot.get('model') or '').strip()}"
+    role = str(slot.get("advisor_role") or "").strip()
     effort = str(slot.get("reasoning_effort") or "").strip()
+    if role and effort:
+        return f"{label}[role={role},reasoning={effort}]"
+    if role:
+        return f"{label}[role={role}]"
     return f"{label}[reasoning={effort}]" if effort else label
+
+
+def _resolved_route(
+    slot: dict[str, Any],
+    route_info: dict[str, str] | None,
+) -> tuple[str, str, str, bool]:
+    """Return a visible label and concrete route for one auxiliary call."""
+    requested_provider = str(slot.get("provider") or "").strip()
+    requested_model = str(slot.get("model") or "").strip()
+    route_info = route_info or {}
+    actual_provider = str(route_info.get("provider") or requested_provider).strip()
+    actual_model = str(route_info.get("model") or requested_model).strip()
+    changed = (
+        actual_provider.lower() != requested_provider.lower()
+        or actual_model != requested_model
+    )
+    label = _slot_label(slot)
+    if changed:
+        label = (
+            f"{label}[actual={actual_provider or 'unknown'}:"
+            f"{actual_model or 'unknown'}]"
+        )
+    return label, actual_provider, actual_model, changed
 
 
 def _slot_reasoning_config(slot: dict[str, Any]) -> dict[str, Any] | None:
@@ -362,7 +433,7 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
     if entry is not None:
         stamped_at, cached = entry
         if now - stamped_at < _RUNTIME_CACHE_TTL_SECONDS:
-            return cached
+            return dict(cached)
     out: dict[str, Any] = {"provider": provider, "model": model}
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -385,10 +456,10 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
         # Never cache a fallback-shaped result: a transient resolution error
         # (config mid-write, catalog hiccup) would otherwise pin the bare
         # provider/model kwargs for a full TTL.
-        return out
+        return dict(out)
     with _runtime_cache_lock:
-        _runtime_cache[cache_key] = (now, out)
-    return out
+        _runtime_cache[cache_key] = (now, dict(out))
+    return dict(out)
 
 
 def _merge_slot_extra_body(
@@ -487,6 +558,7 @@ def _run_reference(
     context_length_cache: Any = None,
     cache_disabled: bool | None = None,
     cache_ttl: str | None = None,
+    execution_brief: ExecutionBrief | None = None,
 ) -> tuple[str, str, Any]:
     """Call one reference model and return ``(label, text, accounting)``.
 
@@ -516,12 +588,17 @@ def _run_reference(
 
     label = _slot_label(slot)
     runtime = _slot_runtime(slot)
+    route_info: dict[str, str] = {}
+    reference_prompt = _reference_prompt_for_slot(slot, execution_brief)
+    messages = [
+        {"role": "system", "content": reference_prompt},
+        *copy.deepcopy(ref_messages),
+    ]
     try:
         # Prepend the advisory-role system prompt so the reference understands
         # it is analyzing state for an aggregator, not acting on the task. The
         # trimmed view (_reference_messages) already strips the agent's own
         # system prompt, so this is the only system message the reference sees.
-        messages = [{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages]
         # Trim to fit THIS reference model's context window. Reference models
         # may have a smaller window than the aggregator (e.g. kimi-k2.7-code
         # @ 262K advising a glm-5.2 @ 1M conversation); without this trim the
@@ -588,16 +665,29 @@ def _run_reference(
             timeout=reference_timeout,
             reasoning_config=_slot_reasoning_config(slot),
             extra_headers=extra_headers,
+            route_info=route_info,
             **runtime,
         )
+        label, actual_provider, actual_model, route_changed = _resolved_route(
+            slot, route_info
+        )
+        if route_changed:
+            logger.warning(
+                "MoA reference %s was served by fallback route %s:%s",
+                _slot_label(slot),
+                actual_provider,
+                actual_model,
+            )
+        runtime_provider = str(runtime.get("provider") or "").strip()
+        same_provider = actual_provider.lower() == runtime_provider.lower()
         usage = CanonicalUsage()
         raw_usage = getattr(response, "usage", None)
         if raw_usage:
             try:
                 usage = normalize_usage(
                     raw_usage,
-                    provider=runtime.get("provider"),
-                    api_mode=runtime.get("api_mode"),
+                    provider=actual_provider,
+                    api_mode=runtime.get("api_mode") if same_provider else None,
                 )
             except Exception:  # pragma: no cover - defensive
                 usage = CanonicalUsage()
@@ -610,11 +700,11 @@ def _run_reference(
         cost_source = None
         try:
             cost = estimate_usage_cost(
-                slot.get("model") or "",
+                actual_model,
                 usage,
-                provider=runtime.get("provider"),
-                base_url=runtime.get("base_url"),
-                api_key=runtime.get("api_key"),
+                provider=actual_provider,
+                base_url=runtime.get("base_url") if same_provider else None,
+                api_key=runtime.get("api_key") if same_provider else None,
             )
             cost_usd = cost.amount_usd
             cost_status = cost.status
@@ -629,19 +719,29 @@ def _run_reference(
             cost_source,
             messages=messages,
             output=_output_text,
-            model=slot.get("model"),
-            provider=runtime.get("provider") or slot.get("provider"),
+            model=actual_model,
+            provider=actual_provider,
             temperature=temperature,
         )
         return label, _output_text, acct
     except Exception as exc:
+        label, actual_provider, actual_model, route_changed = _resolved_route(
+            slot, route_info
+        )
+        if route_changed:
+            logger.warning(
+                "MoA reference %s failed after routing to %s:%s",
+                _slot_label(slot),
+                actual_provider,
+                actual_model,
+            )
         logger.warning("MoA reference model %s failed: %s", label, exc)
         return label, f"[failed: {exc}]", _RefAccounting(
             CanonicalUsage(),
-            messages=[{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages],
+            messages=messages,
             output=f"[failed: {exc}]",
-            model=slot.get("model"),
-            provider=runtime.get("provider") or slot.get("provider"),
+            model=actual_model,
+            provider=actual_provider,
             temperature=temperature,
         )
 
@@ -802,6 +902,7 @@ def _run_references_parallel(
     reference_timeout: float | None = None,
     agent: Any = None,
     late_accounting_sink: Any = None,
+    execution_brief: ExecutionBrief | None = None,
 ) -> list[tuple[str, str, Any]]:
     """Fan out all reference models in parallel, returning outputs in order.
 
@@ -886,6 +987,7 @@ def _run_references_parallel(
                     context_length_cache=_ctx_len_cache,
                     cache_disabled=cache_disabled,
                     cache_ttl=cache_ttl,
+                    execution_brief=execution_brief,
                 )
             ] = idx
 
@@ -1608,6 +1710,11 @@ class MoAChatCompletions:
         # Normalized moa.privacy_filter mode for the current turn ('' |
         # 'display' | 'full'), refreshed from config on every create().
         self._privacy_mode: str = ""
+        # ROKA mode compiles one brief per user turn. The intent advisor's
+        # output is cached separately so later tool iterations cannot rewrite
+        # the task/purpose/constraints while the evidence reviewers refresh.
+        self._roka_brief: ExecutionBrief | None = None
+        self._roka_intent_output: tuple[str, str, Any] | None = None
 
     def consume_reference_usage(self) -> tuple[Any, Any]:
         """Pop pending reference-fan-out usage + cost, resetting both to empty.
@@ -1720,7 +1827,12 @@ class MoAChatCompletions:
         except Exception as exc:  # pragma: no cover - display must never break the turn
             logger.debug("MoA reference_callback failed for %s: %s", event, exc)
 
-    def prepare(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def prepare(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        user_request: str | None = None,
+    ) -> dict[str, Any]:
         """Run the advisor fan-out and return the exact aggregator request.
 
         The normal agent loop needs to measure this augmented prompt before its
@@ -1728,7 +1840,11 @@ class MoAChatCompletions:
         when the loop supplies the returned private object back to ``create()``,
         the advisor fan-out is not repeated.
         """
-        return self.create(messages=messages, _moa_prepare_only=True)
+        return self.create(
+            messages=messages,
+            _moa_prepare_only=True,
+            _roka_user_request=user_request,
+        )
 
     def rebase_prepared_request(
         self, prepared: dict[str, Any], messages: list[dict[str, Any]]
@@ -1753,12 +1869,28 @@ class MoAChatCompletions:
         agg_messages = prepared["messages"]
         aggregator = prepared["aggregator"]
         aggregator_temperature = prepared["aggregator_temperature"]
+        _agent = getattr(self, "_agent", None)
+        control_mode = str(
+            prepared.get("control_mode")
+            or getattr(_agent, "_roka_control_mode", "")
+            or ""
+        ).strip().lower()
         if aggregator.get("provider") == "moa":
             raise RuntimeError("MoA aggregator cannot be another MoA preset")
         agg_kwargs = dict(api_kwargs)
         max_tokens: Any = agg_kwargs.get("max_tokens")
         tools: Any = agg_kwargs.get("tools")
         extra_body: Any = agg_kwargs.get("extra_body")
+        if control_mode == ROKA_CONTROL_MODE and isinstance(tools, list):
+            tools = [
+                tool
+                for tool in tools
+                if not (
+                    isinstance(tool, dict)
+                    and isinstance(tool.get("function"), dict)
+                    and tool["function"].get("name") == "delegate_task"
+                )
+            ]
         agg_runtime = _slot_runtime(aggregator)
         try:
             from agent.agent_runtime_helpers import (
@@ -1779,7 +1911,6 @@ class MoAChatCompletions:
             # Prepared-aggregator facades built via __new__ have no _agent;
             # getattr(self._agent, ...) raises and bool(None-agent) would
             # force False and suppress the planner's config fallback (#76085).
-            _agent = getattr(self, "_agent", None)
             _cache_disabled = (
                 getattr(_agent, "_cache_disabled", None)
                 if _agent is not None
@@ -1859,6 +1990,7 @@ class MoAChatCompletions:
             agg_runtime.pop("extra_body", None),
             extra_body,
         )
+        route_info: dict[str, str] = {}
         _agg_response = call_llm(
             task="moa_aggregator",
             messages=agg_messages,
@@ -1869,9 +2001,42 @@ class MoAChatCompletions:
             # Prepared requests must retain the acting aggregator's reasoning
             # policy exactly as the direct create() path does (#64187).
             reasoning_config=_aggregator_reasoning_config(aggregator),
+            route_info=route_info,
             **stream_kwargs,
             **agg_runtime,
         )
+        (
+            actual_aggregator_label,
+            actual_provider,
+            actual_model,
+            route_changed,
+        ) = _resolved_route(aggregator, route_info)
+        actual_aggregator = dict(aggregator)
+        if route_changed:
+            actual_aggregator["requested_provider"] = str(
+                aggregator.get("provider") or ""
+            )
+            actual_aggregator["requested_model"] = str(
+                aggregator.get("model") or ""
+            )
+            logger.warning(
+                "MoA aggregator %s was served by fallback route %s:%s",
+                _slot_label(aggregator),
+                actual_provider,
+                actual_model,
+            )
+        actual_aggregator["provider"] = actual_provider
+        actual_aggregator["model"] = actual_model
+        self.last_aggregator_slot = actual_aggregator
+        if self._pending_trace is not None:
+            self._pending_trace["aggregator_slot"] = actual_aggregator
+            self._pending_trace["aggregator_label"] = actual_aggregator_label
+        if control_mode == ROKA_CONTROL_MODE and _agent is not None:
+            update_execution_route_for_agent(
+                _agent,
+                provider=actual_provider,
+                model=actual_model,
+            )
         # Non-streaming path (quiet mode / eval / subagents): the aggregator
         # output is available inline, so capture it into the pending trace now.
         # Streaming path: the aggregator's raw token stream is returned to the
@@ -1898,6 +2063,7 @@ class MoAChatCompletions:
         return _agg_response
 
     def create(self, **api_kwargs: Any) -> Any:
+        roka_user_request = api_kwargs.pop("_roka_user_request", None)
         prepared_request = api_kwargs.pop("_moa_prepared_request", None)
         if prepared_request is not None:
             if not isinstance(prepared_request, dict):
@@ -1946,6 +2112,23 @@ class MoAChatCompletions:
             if slot.get("enabled", True)
         ]
         aggregator = preset.get("aggregator") or {}
+        control_mode = str(preset.get("control_mode") or "").strip().lower()
+        if control_mode and control_mode != ROKA_CONTROL_MODE:
+            clear_execution_brief_from_agent(self._agent)
+            raise RuntimeError(
+                f"MoA preset '{self.preset_name}' has unsupported control_mode "
+                f"'{control_mode}'; refusing to silently run it as generic MoA."
+            )
+        roka_configured = control_mode == ROKA_CONTROL_MODE
+        if roka_configured and not preset.get("enabled", True):
+            clear_execution_brief_from_agent(self._agent)
+            raise RuntimeError(
+                f"ROKA preset '{self.preset_name}' is disabled; refusing to run "
+                "its executor without the required advisor control path."
+            )
+        roka_active = roka_configured
+        if self._agent is not None and not roka_active:
+            clear_execution_brief_from_agent(self._agent)
         # Expose the resolved aggregator slot so session cost accounting can
         # price the aggregator's acting turn at its REAL model/provider. The
         # agent's model/provider on the MoA path are the virtual preset name
@@ -1994,6 +2177,178 @@ class MoAChatCompletions:
 
         reference_outputs: list[tuple[str, str, Any]] = []
         ref_messages = _reference_messages(messages)
+        roka_brief: ExecutionBrief | None = None
+        roka_intent_fresh = False
+        roka_missing_roles: list[str] = []
+        roka_invalid_advisors: list[tuple[str, str]] = []
+
+        if roka_active:
+            try:
+                from agent.prompt_cache_scope import resolve_prompt_cache_scope_safe
+
+                parent_session_id = str(
+                    resolve_prompt_cache_scope_safe(self._agent)
+                    or getattr(self._agent, "session_id", "")
+                    or ""
+                )
+            except Exception:
+                parent_session_id = str(
+                    getattr(self._agent, "session_id", "") or ""
+                )
+            brief_id = build_brief_id(
+                messages,
+                parent_session_id=parent_session_id,
+                turn_id=str(
+                    getattr(self._agent, "_current_turn_id", "") or ""
+                ),
+            )
+
+            # Config writes validate the three unique roles. Runtime remains
+            # defensive against hand-edited files, but it never silently
+            # relabels a model and pretends the full control group ran.
+            expected_roles = list(ROKA_ADVISOR_ROLES)
+            slots_by_role: dict[str, dict[str, Any]] = {}
+            for slot in reference_models:
+                role = str(slot.get("advisor_role") or "").strip().lower()
+                if role not in expected_roles:
+                    logger.warning(
+                        "ROKA ignored invalid advisor role %r",
+                        role or "<missing>",
+                    )
+                    roka_invalid_advisors.append(
+                        (
+                            _slot_label(slot),
+                            "[failed: invalid or missing ROKA advisor role]",
+                        )
+                    )
+                    continue
+                if role in slots_by_role:
+                    logger.warning("ROKA ignored duplicate advisor role %r", role)
+                    roka_invalid_advisors.append(
+                        (
+                            _slot_label(slot),
+                            f"[failed: duplicate ROKA advisor role {role}]",
+                        )
+                    )
+                    continue
+                slots_by_role[role] = slot
+            roka_missing_roles = [
+                role for role in expected_roles if role not in slots_by_role
+            ]
+            if roka_missing_roles:
+                logger.warning(
+                    "ROKA preset is degraded; missing advisor role(s): %s",
+                    ", ".join(roka_missing_roles),
+                )
+
+            identified_slots: list[dict[str, Any]] = []
+            for index, role in enumerate(expected_roles):
+                slot = slots_by_role.get(role)
+                if slot is None:
+                    continue
+                identified_slots.append(
+                    {
+                        **slot,
+                        "_brief_id": brief_id,
+                        "_agent_session_id": build_agent_session_id(
+                            brief_id,
+                            role,
+                            provider=str(slot.get("provider") or ""),
+                            model=str(slot.get("model") or ""),
+                            index=index,
+                        ),
+                    }
+                )
+
+            intent_slot = next(
+                (
+                    slot
+                    for slot in identified_slots
+                    if slot.get("advisor_role") == "intent_analyst"
+                ),
+                None,
+            )
+            reviewer_slots = [
+                slot
+                for slot in identified_slots
+                if slot.get("advisor_role") != "intent_analyst"
+            ]
+
+            if self._roka_brief is None or self._roka_brief.brief_id != brief_id:
+                roka_intent_fresh = True
+                if intent_slot is not None:
+                    intent_outputs = _run_references_parallel(
+                        [intent_slot],
+                        ref_messages,
+                        temperature=temperature,
+                        max_tokens=reference_max_tokens,
+                        reference_timeout=reference_timeout,
+                        agent=self._agent,
+                        late_accounting_sink=self._record_late_reference_accounting,
+                        execution_brief=None,
+                    )
+                    self._roka_intent_output = (
+                        intent_outputs[0] if intent_outputs else None
+                    )
+                else:
+                    self._roka_intent_output = (
+                        "unconfigured[role=intent_analyst]",
+                        "[failed: required ROKA advisor role is not configured]",
+                        _RefAccounting(CanonicalUsage()),
+                    )
+
+                intent_text = (
+                    self._roka_intent_output[1]
+                    if self._roka_intent_output is not None
+                    else ""
+                )
+                self._roka_brief = parse_execution_brief(
+                    intent_text,
+                    brief_id=brief_id,
+                    user_request=(
+                        str(roka_user_request).strip()
+                        if roka_user_request is not None
+                        and str(roka_user_request).strip()
+                        else latest_user_request(messages)
+                    ),
+                )
+                if (
+                    self._roka_brief.source != "advisor"
+                    and self._roka_intent_output is not None
+                    and not _is_failed_reference(intent_text)
+                ):
+                    intent_label, _raw_text, intent_accounting = (
+                        self._roka_intent_output
+                    )
+                    self._roka_intent_output = (
+                        intent_label,
+                        "[failed: intent analysis was malformed; conservative "
+                        "fallback brief applied]",
+                        intent_accounting,
+                    )
+                elif (
+                    self._roka_brief.source == "advisor"
+                    and self._roka_intent_output is not None
+                ):
+                    intent_label, _raw_text, intent_accounting = (
+                        self._roka_intent_output
+                    )
+                    self._roka_intent_output = (
+                        intent_label,
+                        self._roka_brief.render(),
+                        intent_accounting,
+                    )
+
+            roka_brief = self._roka_brief
+            if roka_brief is not None:
+                apply_execution_brief_to_agent(
+                    self._agent,
+                    roka_brief,
+                    provider=str(aggregator.get("provider") or ""),
+                    model=str(aggregator.get("model") or ""),
+                    parent_session_id=parent_session_id,
+                )
+            reference_models = reviewer_slots
 
         # Fan-out cadence. "user_turn" (default — cheapest cadence, #67199):
         # advisors run ONCE per user turn; subsequent tool iterations reuse
@@ -2078,7 +2433,17 @@ class MoAChatCompletions:
         # signature is stable across those iterations (prefix hash above), so
         # the fan-out runs once per user turn and iterations reuse the advice.
         _sig = _hash_messages(sig_messages)
-        _cache_key = (self.preset_name, _sig, tuple(_slot_label(s) for s in reference_models))
+        _roka_degraded_key = (
+            tuple(roka_missing_roles),
+            tuple(roka_invalid_advisors),
+        )
+        _cache_key = (
+            self.preset_name,
+            _sig,
+            tuple(_slot_label(s) for s in reference_models),
+            _roka_degraded_key,
+            roka_brief.brief_id if roka_brief is not None else "",
+        )
         if _every_n_reuse:
             # Off-cadence every_n iteration: pin the key to the last
             # on-cadence run so the lookup below is a HIT and its guidance is
@@ -2126,7 +2491,32 @@ class MoAChatCompletions:
                 reference_timeout=reference_timeout,
                 agent=self._agent,
                 late_accounting_sink=self._record_late_reference_accounting,
+                execution_brief=roka_brief,
             )
+            if roka_brief is not None and self._roka_intent_output is not None:
+                intent_label, intent_text, intent_accounting = self._roka_intent_output
+                if not roka_intent_fresh:
+                    intent_label = f"{intent_label}[cached]"
+                    intent_accounting = _accounting_without_usage(intent_accounting)
+                reference_outputs.insert(
+                    0,
+                    (intent_label, intent_text, intent_accounting),
+                )
+            if roka_brief is not None:
+                for missing_role in roka_missing_roles:
+                    if missing_role == "intent_analyst":
+                        continue
+                    reference_outputs.append(
+                        (
+                            f"unconfigured[role={missing_role}]",
+                            "[failed: required ROKA advisor role is not configured]",
+                            _RefAccounting(CanonicalUsage()),
+                        )
+                    )
+                reference_outputs.extend(
+                    (label, message, _RefAccounting(CanonicalUsage()))
+                    for label, message in roka_invalid_advisors
+                )
             interrupted_any = any(
                 text == _INTERRUPTED_REFERENCE_NOTE
                 for _lbl, text, _acct in reference_outputs
@@ -2241,7 +2631,12 @@ class MoAChatCompletions:
 
         guidance: str | None = None
         agg_messages = [dict(m) for m in messages]
-        successful_outputs = _successful_references(reference_outputs)
+        advisory_outputs = [
+            output
+            for output in reference_outputs
+            if "[role=intent_analyst" not in output[0]
+        ]
+        successful_outputs = _successful_references(advisory_outputs)
         failed_labels = _failed_reference_labels(reference_outputs)
         joined = ""
         _agg_refs: list = []
@@ -2263,7 +2658,7 @@ class MoAChatCompletions:
                 for idx, (label, text, _usage) in enumerate(_agg_refs, start=1)
             )
         degraded = _degraded_notice(failed_labels, degraded_reference_policy)
-        if reference_outputs and not successful_outputs:
+        if advisory_outputs and not successful_outputs:
             # Every reference failed or was skipped: don't wrap a wall of
             # failure sentinels in "use the reference responses below"
             # guidance — the aggregator IS the acting model, so it simply
@@ -2273,7 +2668,7 @@ class MoAChatCompletions:
             logger.warning(
                 "MoA: all %d reference(s) failed — acting aggregator-alone "
                 "without reference guidance",
-                len(reference_outputs),
+                len(advisory_outputs),
             )
             if degraded:
                 guidance = (
@@ -2284,7 +2679,6 @@ class MoAChatCompletions:
                     "guidance is available. Act on your own judgment.\n\n"
                     f"{degraded}"
                 )
-                _attach_reference_guidance(agg_messages, guidance)
         elif joined or degraded:
             if degraded:
                 joined = f"{joined}\n\n{degraded}" if joined else degraded
@@ -2297,6 +2691,29 @@ class MoAChatCompletions:
                 "answer the user directly or call tools as needed.\n\n"
                 f"{joined}"
             )
+
+        if roka_brief is not None:
+            executor_session_id = str(
+                getattr(self._agent, "_agent_session_id", "") or "unassigned"
+            )
+            failed_summary = ", ".join(failed_labels) if failed_labels else "none"
+            control_guidance = (
+                "[ROKA control context]\n"
+                "The execution brief below is immutable for this user turn. "
+                "Use advisor responses as checks, not as authority to rewrite it.\n"
+                "Do not use generic file or terminal tools to bypass memory or "
+                "skill approval.\n"
+                f"Executor logical session: {executor_session_id}\n"
+                f"Unavailable advisor roles/models: {failed_summary}\n"
+                f"Execution brief:\n{roka_brief.render()}"
+            )
+            guidance = (
+                f"{control_guidance}\n\n{guidance}"
+                if guidance
+                else control_guidance
+            )
+
+        if guidance:
             _attach_reference_guidance(agg_messages, guidance)
 
         prepared_request = {
@@ -2304,6 +2721,7 @@ class MoAChatCompletions:
             "guidance": guidance,
             "aggregator": aggregator,
             "aggregator_temperature": aggregator_temperature,
+            "control_mode": control_mode,
         }
         if api_kwargs.pop("_moa_prepare_only", False):
             return prepared_request

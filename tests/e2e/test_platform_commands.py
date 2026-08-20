@@ -170,6 +170,37 @@ class TestSlashCommands:
         runner._handle_status_command.assert_awaited_once()
         runner._handle_message_with_agent.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_moa_one_shot_uses_roka_facade_not_legacy_context(
+        self, adapter, runner, platform, monkeypatch
+    ):
+        captured = {}
+
+        async def _handle(event, _source, _quick_key, _run_generation):
+            key = runner._session_key_for_source(event.source)
+            captured["override"] = dict(
+                runner._session_state(key).conversation.model_override or {}
+            )
+            captured["legacy_config"] = getattr(event, "_moa_config", None)
+            captured["text"] = event.text
+            return "roka turn handled"
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+        runner._handle_message_with_agent = AsyncMock(side_effect=_handle)
+
+        send = await send_and_capture(adapter, "/moa inspect the release", platform)
+
+        send.assert_called_once()
+        assert captured["override"] == {
+            "provider": "moa",
+            "model": "roka",
+            "base_url": "moa://local",
+            "api_key": "moa-virtual-provider",
+            "api_mode": "chat_completions",
+        }
+        assert captured["legacy_config"] is None
+        assert captured["text"] == "inspect the release"
+
 
 
 class TestSessionLifecycle:

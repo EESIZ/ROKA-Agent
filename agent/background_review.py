@@ -3,9 +3,9 @@
 After every turn, ``AIAgent.run_conversation`` may call
 :func:`spawn_background_review` to fire off a daemon thread that replays
 the conversation snapshot in a forked :class:`AIAgent` and asks itself
-"should any skill/memory be saved or updated?".  Writes go straight to
-the memory + skill stores.  Main conversation and prompt cache are never
-touched.
+"should any skill/memory be saved or updated?". Writes use the normal memory
+and skill paths, including any active approval policy. Main conversation and
+prompt cache are never touched.
 
 The fork inherits the parent's live runtime (provider, model, base_url,
 credentials, cached system prompt) so it hits the same prefix cache and
@@ -135,6 +135,8 @@ def _resolve_review_runtime(
     the fork uses the main model and the warm cache, exactly as before. When
     ``auxiliary.background_review.{provider,model}`` names a concrete model
     different from the parent's, resolve that runtime and set ``routed=True``.
+    A ROKA spawn snapshot takes precedence over that optional route and always
+    resolves the concrete acting executor model, never another MoA facade.
     """
     parent_runtime = agent._current_main_runtime()
     parent_api_mode = parent_runtime.get("api_mode") or None
@@ -158,7 +160,26 @@ def _resolve_review_runtime(
     task_model = (str(task.get("model", "")).strip() or None)
     task_base_url = (str(task.get("base_url", "")).strip() or None)
     task_api_key = (str(task.get("api_key", "")).strip() or None)
-    if not (task_provider and task_provider != "auto" and task_model):
+    control_snapshot = task.get("_roka_control_snapshot")
+    roka_route = (
+        isinstance(control_snapshot, dict)
+        and control_snapshot.get("control_mode") == "roka"
+    )
+    if roka_route:
+        # A configured auxiliary review model must not replace or recursively
+        # re-enter the ROKA facade. The spawn-time snapshot records the direct
+        # route that actually acted, so it is the sole review route in ROKA.
+        task_provider = (
+            str(control_snapshot.get("model_provider") or "").strip() or None
+        )
+        task_model = str(control_snapshot.get("model") or "").strip() or None
+        task_base_url = None
+        task_api_key = None
+        if not task_provider or not task_model or task_provider == "moa":
+            raise RuntimeError(
+                "ROKA background review requires a concrete direct executor route"
+            )
+    elif not (task_provider and task_provider != "auto" and task_model):
         return parent
     if task_provider == (agent.provider or "") and task_model == (agent.model or ""):
         return parent  # same model/provider as parent -> not routed
@@ -184,6 +205,27 @@ def _resolve_review_runtime(
             "routed": True,
         }
     except Exception as e:
+        if roka_route:
+            logger.warning(
+                "ROKA background-review routing failed for %s:%s; "
+                "using an isolated direct runtime without recursive MoA",
+                task_provider,
+                task_model,
+                exc_info=True,
+            )
+            return {
+                "provider": task_provider,
+                "model": task_model,
+                "api_key": None,
+                "base_url": None,
+                "api_mode": None,
+                "credential_pool": None,
+                "request_overrides": {},
+                "max_tokens": None,
+                "command": None,
+                "args": [],
+                "routed": True,
+            }
         logger.debug("background-review aux routing failed (%s); using main model", e)
         return parent
 
@@ -245,7 +287,16 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
 # the user-message that the forked review agent receives.  AIAgent exposes
 # them as class attributes (``_MEMORY_REVIEW_PROMPT`` etc.) for back-compat;
 # the actual text lives here so future edits are one-place.
-_MEMORY_REVIEW_PROMPT = (
+_LEARNING_REVIEW_CONTROL = (
+    "Durable learning is evidence-gated. Before calling memory or skill_manage, "
+    "identify the exact conversation evidence, decide whether it is stable beyond "
+    "this session, and consider the blast radius of persisting it. Do not create or "
+    "update anything merely to make the review productive. When evidence is absent, "
+    "ambiguous, transient, or unverified, 'Nothing to save.' is the expected result. "
+    "Any write is a proposal subject to the active approval policy.\n\n"
+)
+
+_MEMORY_REVIEW_PROMPT = _LEARNING_REVIEW_CONTROL + (
     "Review the conversation above and consider saving to memory if appropriate.\n\n"
     "Focus on:\n"
     "1. Has the user revealed things about themselves — their persona, desires, "
@@ -256,16 +307,14 @@ _MEMORY_REVIEW_PROMPT = (
     "If nothing is worth saving, just say 'Nothing to save.' and stop."
 )
 
-_SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and update the skill library. Be "
-    "ACTIVE — most sessions produce at least one skill update, even if "
-    "small. A pass that does nothing is a missed learning opportunity, "
-    "not a neutral outcome.\n\n"
+_SKILL_REVIEW_PROMPT = _LEARNING_REVIEW_CONTROL + (
+    "Review the conversation above and propose a skill-library update only "
+    "when durable, reusable evidence supports it.\n\n"
     "Target shape of the library: CLASS-LEVEL skills, each with a rich "
     "SKILL.md and a `references/` directory for session-specific detail. "
     "Not a long flat list of narrow one-session-one-skill entries. This "
     "shapes HOW you update, not WHETHER you update.\n\n"
-    "Signals to look for (any one of these warrants action):\n"
+    "Signals to investigate (each still requires durable evidence):\n"
     "  • User corrected your style, tone, format, legibility, or "
     "verbosity. Frustration signals like 'stop doing X', 'this is too "
     "verbose', 'don't format like this', 'why are you explaining', "
@@ -279,10 +328,10 @@ _SKILL_REVIEW_PROMPT = (
     "  • Non-trivial technique, fix, workaround, debugging path, or "
     "tool-usage pattern emerged that a future session would benefit "
     "from. Capture it.\n"
-    "  • A skill that got loaded or consulted this session turned out "
-    "to be wrong, missing a step, or outdated. Patch it NOW.\n\n"
-    "Preference order — prefer the earliest action that fits, but do "
-    "pick one when a signal above fired:\n"
+    "  • A skill that got loaded or consulted this session was proven "
+    "wrong, missing a step, or outdated by observable task evidence.\n\n"
+    "Preference order — when a write is justified, prefer the earliest "
+    "action that fits:\n"
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Look back through the "
     "conversation for skills the user loaded via /skill-name or you "
     "read via skill_view. If any of them covers the territory of the "
@@ -375,25 +424,22 @@ _SKILL_REVIEW_PROMPT = (
     "command, config step, env var to set) under an existing setup or "
     "troubleshooting skill — never 'this tool does not work' as a "
     "standalone constraint.\n\n"
-    "'Nothing to save.' is a real option but should NOT be the "
-    "default. If the session ran smoothly with no corrections and "
-    "produced no new technique, just say 'Nothing to save.' and stop. "
-    "Otherwise, act."
+    "If the session does not contain verified, reusable learning, say "
+    "'Nothing to save.' and stop. This is a normal successful review outcome."
 )
 
-_COMBINED_REVIEW_PROMPT = (
+_COMBINED_REVIEW_PROMPT = _LEARNING_REVIEW_CONTROL + (
     "Review the conversation above and update two things:\n\n"
     "**Memory**: who the user is. Did the user reveal persona, "
     "desires, preferences, personal details, or expectations about "
     "how you should behave? Save facts about the user and durable "
     "preferences with the memory tool.\n\n"
-    "**Skills**: how to do this class of task. Be ACTIVE — most "
-    "sessions produce at least one skill update. A pass that does "
-    "nothing is a missed learning opportunity, not a neutral outcome.\n\n"
+    "**Skills**: how to do this class of task. Propose an update only "
+    "when durable, reusable evidence supports it.\n\n"
     "Target shape of the skill library: CLASS-LEVEL skills with a rich "
     "SKILL.md and a `references/` directory for session-specific detail. "
     "Not a long flat list of narrow one-session-one-skill entries.\n\n"
-    "Signals that warrant a skill update (any one is enough):\n"
+    "Signals to investigate (each still requires durable evidence):\n"
     "  • User corrected your style, tone, format, legibility, "
     "verbosity, or approach. Frustration is a FIRST-CLASS skill "
     "signal, not just a memory signal. 'stop doing X', 'don't format "
@@ -401,9 +447,9 @@ _COMBINED_REVIEW_PROMPT = (
     "that governs that task so the next session starts fixed.\n"
     "  • Non-trivial technique, fix, workaround, or debugging path "
     "emerged.\n"
-    "  • A skill that was loaded or consulted turned out wrong, "
-    "missing, or outdated — patch it now.\n\n"
-    "Preference order for skills — pick the earliest that fits:\n"
+    "  • A skill that was loaded or consulted was proven wrong, "
+    "missing, or outdated by observable task evidence.\n\n"
+    "Preference order for justified skill writes — pick the earliest that fits:\n"
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Check what skills were "
     "loaded via /skill-name or skill_view in the conversation. If one "
     "of them covers the learning, PATCH it first. It was in play; "
@@ -477,9 +523,8 @@ _COMBINED_REVIEW_PROMPT = (
     "command, config step, env var to set) under an existing setup or "
     "troubleshooting skill — never 'this tool does not work' as a "
     "standalone constraint.\n\n"
-    "Act on whichever of the two dimensions has real signal. If "
-    "genuinely nothing stands out on either, say 'Nothing to save.' "
-    "and stop — but don't reach for that conclusion as a default."
+    "Act only on a dimension with durable evidence. If neither has it, say "
+    "'Nothing to save.' and stop. This is a normal successful review outcome."
 )
 
 
@@ -590,6 +635,15 @@ def summarize_background_review_actions(
             detail = {}
         target = data.get("target", "") or detail.get("target", "")
         is_skill = detail.get("tool") == "skill_manage"
+
+        if data.get("staged"):
+            label = "Skill" if is_skill else (
+                "Memory" if target == "memory" else "User profile"
+                if target == "user" else "Memory"
+            )
+            pending_id = str(data.get("pending_id") or "unknown")
+            actions.append(f"{label} proposal pending approval ({pending_id})")
+            continue
 
         message_lower = message.lower()
         if not verbose:
@@ -712,7 +766,17 @@ def build_memory_write_metadata(
     evidence_refs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build provenance metadata for external memory-provider mirrors."""
-    metadata: Dict[str, Any] = {
+    try:
+        from agent.roka_control import execution_metadata_for_agent
+
+        metadata: Dict[str, Any] = execution_metadata_for_agent(
+            agent,
+            task_id=task_id or "",
+            tool_call_id=tool_call_id or "",
+        )
+    except Exception:
+        metadata = {}
+    metadata.update({
         "write_origin": write_origin or getattr(agent, "_memory_write_origin", "assistant_tool"),
         "execution_context": (
             execution_context
@@ -725,10 +789,14 @@ def build_memory_write_metadata(
         "brief_id": getattr(agent, "_execution_brief_id", "") or getattr(agent, "_brief_id", ""),
         "agent_session_id": getattr(agent, "_agent_session_id", "") or agent.session_id or "",
         "agent_role": getattr(agent, "_agent_role", ""),
-        "model_provider": getattr(agent, "provider", ""),
-        "model": getattr(agent, "model", ""),
-        "risk_class": risk_class or getattr(agent, "_learning_risk_class", ""),
-    }
+        "model_provider": getattr(agent, "_roka_model_provider", "") or getattr(agent, "provider", ""),
+        "model": getattr(agent, "_roka_model", "") or getattr(agent, "model", ""),
+        "risk_class": (
+            risk_class
+            or getattr(agent, "_learning_risk_class", "")
+            or ("approval_required" if getattr(agent, "_roka_control_mode", "") == "roka" else "")
+        ),
+    })
     if task_id:
         metadata["task_id"] = task_id
     if tool_call_id:
@@ -954,6 +1022,11 @@ def _run_review_in_thread(
             # -> codex_responses downgrade is applied inside the resolver.
             _rt = _resolve_review_runtime(agent, task_cfg)
             _routed = bool(_rt.get("routed"))
+            control_snapshot = (
+                task_cfg.get("_roka_control_snapshot", {})
+                if isinstance(task_cfg, dict)
+                else {}
+            )
             # skip_memory=True keeps the review fork from
             # touching external memory plugins (honcho, mem0,
             # supermemory, etc.).  Without it, the fork's
@@ -1039,7 +1112,9 @@ def _run_review_in_thread(
                 api_key=_rt.get("api_key") or None,
                 credential_pool=_rt.get("credential_pool"),
                 request_overrides=_rt.get("request_overrides") or {},
-                parent_session_id=agent.session_id,
+                parent_session_id=(
+                    control_snapshot.get("parent_session_id") or agent.session_id
+                ),
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 skip_memory=True,
@@ -1105,7 +1180,27 @@ def _run_review_in_thread(
                 # rebuild path, but these pins guarantee parity even
                 # if a future code path bypasses the cache.
                 review_agent.session_start = agent.session_start
-            review_agent.session_id = agent.session_id
+            review_agent.session_id = (
+                control_snapshot.get("parent_session_id") or agent.session_id
+            )
+            if control_snapshot.get("control_mode") == "roka":
+                from agent.roka_control import build_agent_session_id
+
+                brief_id = str(control_snapshot.get("brief_id") or "")
+                review_agent._roka_control_mode = "roka"
+                review_agent._execution_brief = copy.deepcopy(
+                    control_snapshot.get("execution_brief", {}) or {}
+                )
+                review_agent._execution_brief_id = brief_id
+                review_agent._agent_role = "background_reviewer"
+                review_agent._agent_session_id = build_agent_session_id(
+                    brief_id,
+                    "background_reviewer",
+                    provider=str(review_agent.provider or ""),
+                    model=str(review_agent.model or ""),
+                )
+                review_agent._roka_model_provider = str(review_agent.provider or "")
+                review_agent._roka_model = str(review_agent.model or "")
             # The fork shares the parent's live session_id (pinned above for
             # prefix-cache parity). It is single-lifecycle and calls close()
             # right after this run_conversation(); without opting out, close()
@@ -1350,6 +1445,26 @@ def spawn_background_review_thread(
     """
     if task_cfg is None:
         task_cfg = _background_review_task_config()
+    task_cfg = dict(task_cfg) if isinstance(task_cfg, dict) else {}
+    control_snapshot: Dict[str, Any] = {}
+    if getattr(agent, "_roka_control_mode", "") == "roka":
+        control_snapshot = {
+            "control_mode": "roka",
+            "brief_id": str(getattr(agent, "_execution_brief_id", "") or ""),
+            "execution_brief": copy.deepcopy(
+                getattr(agent, "_execution_brief", {}) or {}
+            ),
+            "parent_session_id": str(getattr(agent, "session_id", "") or ""),
+            "model_provider": str(
+                getattr(agent, "_roka_model_provider", "") or ""
+            ),
+            "model": str(getattr(agent, "_roka_model", "") or ""),
+        }
+        control_snapshot["parent_session_id"] = str(
+            getattr(agent, "_roka_parent_session_id", "")
+            or control_snapshot["parent_session_id"]
+        )
+        task_cfg["_roka_control_snapshot"] = control_snapshot
     # Pick the right prompt based on which triggers fired.  Allow per-agent
     # override (the prompts moved to module-level constants but old code paths
     # that set agent._MEMORY_REVIEW_PROMPT etc. directly keep working).
@@ -1359,6 +1474,16 @@ def spawn_background_review_thread(
         prompt = getattr(agent, "_MEMORY_REVIEW_PROMPT", _MEMORY_REVIEW_PROMPT)
     else:
         prompt = getattr(agent, "_SKILL_REVIEW_PROMPT", _SKILL_REVIEW_PROMPT)
+
+    execution_brief = control_snapshot.get("execution_brief")
+    if isinstance(execution_brief, dict) and execution_brief:
+        prompt = (
+            f"{prompt}\n\n"
+            "[ROKA learning context]\n"
+            "The execution brief below is immutable. Learning must stay within "
+            "its scope and must not rewrite the user's intent.\n"
+            f"{json.dumps(execution_brief, ensure_ascii=False, indent=2)}"
+        )
 
     focus = (focus or "").strip()
     if focus:

@@ -8,6 +8,8 @@ import math
 from copy import deepcopy
 from typing import Any
 
+from agent.roka_control import ROKA_ADVISOR_ROLES, ROKA_CONTROL_MODE
+
 MOA_MARKER_PREFIX = "__HERMES_MOA_TURN_V1__"
 DEFAULT_MOA_PRESET_NAME = "default"
 
@@ -206,6 +208,9 @@ def _clean_slot(slot: Any, *, include_enabled: bool = False) -> dict[str, Any] |
     if provider.lower() == "moa":
         return None
     clean: dict[str, Any] = {"provider": provider, "model": model}
+    advisor_role = str(slot.get("advisor_role") or "").strip().lower()
+    if advisor_role in ROKA_ADVISOR_ROLES:
+        clean["advisor_role"] = advisor_role
     effort = _clean_reasoning_effort(slot.get("reasoning_effort"))
     if effort:
         clean["reasoning_effort"] = effort
@@ -241,6 +246,9 @@ def _slot_problem(slot: Any) -> str | None:
         return f"model is required (provider '{provider}' has no model selected)"
     if provider.lower() == "moa":
         return "the Mixture of Agents provider cannot be used inside a preset (recursive MoA)"
+    advisor_role = str(slot.get("advisor_role") or "").strip().lower()
+    if advisor_role and advisor_role not in ROKA_ADVISOR_ROLES:
+        return f"unknown advisor_role '{advisor_role}'"
     return None
 
 
@@ -277,14 +285,33 @@ def validate_moa_payload(raw: Any) -> list[str]:
         if not isinstance(refs, list):
             refs = [refs] if isinstance(refs, dict) else []
         complete_refs = 0
+        enabled_roles: list[str] = []
         for index, slot in enumerate(refs):
             issue = _slot_problem(slot)
             if issue:
                 problems.append(f"preset '{label}' reference {index + 1}: {issue}")
             else:
                 complete_refs += 1
+                if _coerce_bool(slot.get("enabled"), True):
+                    role = str(slot.get("advisor_role") or "").strip().lower()
+                    if role:
+                        enabled_roles.append(role)
         if not complete_refs:
             problems.append(f"preset '{label}': needs at least one complete reference model")
+
+        control_mode = str(preset.get("control_mode") or "").strip().lower()
+        if control_mode and control_mode != ROKA_CONTROL_MODE:
+            problems.append(
+                f"preset '{label}': unknown control_mode '{control_mode}'"
+            )
+        elif control_mode == ROKA_CONTROL_MODE:
+            expected_roles = set(ROKA_ADVISOR_ROLES)
+            if len(refs) != len(ROKA_ADVISOR_ROLES) or set(enabled_roles) != expected_roles:
+                problems.append(
+                    f"preset '{label}': ROKA mode requires exactly three enabled "
+                    "references with unique roles: "
+                    + ", ".join(ROKA_ADVISOR_ROLES)
+                )
 
         agg_issue = _slot_problem(preset.get("aggregator"))
         if agg_issue:
@@ -333,7 +360,7 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
 
     aggregator = _clean_slot(raw.get("aggregator")) or deepcopy(DEFAULT_MOA_AGGREGATOR)
 
-    return {
+    normalized = {
         "enabled": _coerce_bool(raw.get("enabled"), True),
         "reference_models": refs,
         "aggregator": aggregator,
@@ -367,6 +394,13 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # {mode: every_n, n: N}, normalized to the canonical string.
         "fanout": _coerce_fanout(raw.get("fanout")),
     }
+    control_mode = str(raw.get("control_mode") or "").strip().lower()
+    if control_mode:
+        # Preserve unknown hand-edited values so the runtime can reject them
+        # loudly. Dropping the field here would silently turn a mistyped ROKA
+        # preset into ordinary MoA execution under the same preset name.
+        normalized["control_mode"] = control_mode
+    return normalized
 
 
 def normalize_moa_config(raw: Any) -> dict[str, Any]:
@@ -408,6 +442,7 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         # Compatibility/flattened view for existing dashboard/desktop callers.
         "reference_models": deepcopy(active["reference_models"]),
         "aggregator": deepcopy(active["aggregator"]),
+        "control_mode": active.get("control_mode"),
         "reference_temperature": active["reference_temperature"],
         "aggregator_temperature": active["aggregator_temperature"],
         "reference_timeout": active["reference_timeout"],

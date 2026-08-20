@@ -1261,6 +1261,8 @@ export interface AuxiliaryModelsResponse {
 export interface MoaModelSlot {
   provider: string
   model: string
+  /** Fixed semantic role for a ROKA advisor slot. */
+  advisor_role?: 'intent_analyst' | 'constraint_reviewer' | 'verification_reviewer'
   /** Optional per-slot reasoning effort — round-tripped, not edited here. */
   reasoning_effort?: string
   enabled?: boolean
@@ -1274,6 +1276,7 @@ export interface MoaConfigResponse {
     {
       aggregator: MoaModelSlot
       aggregator_temperature: number
+      control_mode?: 'roka'
       degraded_reference_policy: 'loud' | 'silent'
       enabled: boolean
       max_tokens: number
@@ -1288,6 +1291,7 @@ export interface MoaConfigResponse {
   >
   aggregator: MoaModelSlot
   aggregator_temperature: number
+  control_mode?: 'roka'
   degraded_reference_policy: 'loud' | 'silent'
   enabled: boolean
   max_tokens: number

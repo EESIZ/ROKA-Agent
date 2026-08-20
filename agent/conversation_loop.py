@@ -1755,6 +1755,14 @@ def run_conversation(
         except Exception:
             pass
 
+    # The legacy one-shot context path is generic MoA only.  It does not run
+    # the ROKA facade and therefore cannot enforce a frozen brief, isolated
+    # role identities, or executor provenance.  Refuse a ROKA-labelled config
+    # here rather than presenting ordinary reference synthesis as ROKA.
+    from agent.roka_control import reject_legacy_roka_execution
+
+    reject_legacy_roka_execution(moa_config)
+
     # The gateway caches agents across user turns.  Compression state is
     # per-turn: carrying a prior in-place boundary forward would make a later
     # uncompressed result look like a compacted transcript to gateway writers.
@@ -2458,7 +2466,17 @@ def run_conversation(
             if _moa_prepared_request is None:
                 _prepare_moa_request = getattr(_moa_completions, "prepare", None)
                 if callable(_prepare_moa_request):
-                    _moa_prepared_request = _prepare_moa_request(api_messages)
+                    from agent.message_content import flatten_message_text
+
+                    _clean_roka_request = (
+                        original_user_message
+                        if isinstance(original_user_message, str)
+                        else flatten_message_text(original_user_message)
+                    )
+                    _moa_prepared_request = _prepare_moa_request(
+                        api_messages,
+                        user_request=_clean_roka_request,
+                    )
             if _moa_prepared_request is not None:
                 api_messages = _moa_prepared_request["messages"]
 

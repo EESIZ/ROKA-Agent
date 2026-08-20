@@ -73,6 +73,18 @@ def test_moa_non_preset_is_one_shot_prompt():
     assert cli._pending_moa_restore_model["provider"] != "moa"
 
 
+def test_moa_one_shot_without_loaded_moa_block_uses_shipped_roka_default():
+    cli = _make_cli()
+    cli.config = {}
+
+    with patch("cli._cprint"):
+        cli.process_command("/moa inspect the release")
+
+    assert cli.provider == "moa"
+    assert cli.model == "roka"
+    assert cli._pending_agent_seed == "inspect the release"
+
+
 
 
 class TestNormalizeMoaModel:
@@ -112,4 +124,3 @@ class TestNormalizeMoaModel:
         requested_provider = override or "deepseek" or "auto"
         assert requested_provider == "moa"
         assert model == "strategy"
-

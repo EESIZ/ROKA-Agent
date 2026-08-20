@@ -1,294 +1,306 @@
 # ROKA-Agent
 
-ROKA-Agent is an experimental fork of Hermes Agent for intent-preserving agent
-control.
+ROKA-Agent is an intent-preserving control profile for
+[Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-The project starts from one working rule:
+> Centralize observation, keep judgment at the edge, and replicate intent on
+> both sides.
 
-> Put observation near the center, put judgment near the edge, and copy intent
-> into both sides.
+The user writes an ordinary request. ROKA compiles it into one execution brief,
+runs three tool-free advisors in isolated contexts, and gives the same brief and
+advice to one tool-enabled executor. Built-in memory and skill-tool changes are
+treated as reviewable proposals instead of silent self-modification.
 
-For LLM agents, that means a user should not have to micromanage every step, and
-the agent should not silently rewrite its own behavior after every task. ROKA is
-the control layer between those failures. It makes the work brief explicit,
-keeps agent sessions separated, records where learning came from, and routes
-durable memory or skill changes through reviewable gates.
+ROKA does not replace Hermes sessions, tools, model routing, memory, skills, or
+approval storage. Its first engineering rule is **do not rebuild the wheel**:
+extend existing Hermes functions at the smallest useful control points.
 
-ROKA does not try to replace Hermes. The first design rule is: do not rebuild
-what Hermes already has. Reuse Hermes sessions, tools, memory, skills,
-delegation, background review, approval gates, and ledgers. Add the smallest
-policy or metadata layer needed to make them more controllable.
+## Release Status
 
-## Current Status
-
-This repository is at the first ROKA milestone.
+The **v0.1 source release is ready**. The runtime control path is implemented
+and covered by focused and upstream regression tests. A live four-provider run
+still requires the operator to configure Codex and OpenRouter credentials; the
+release does not bundle or silently substitute credentials.
 
 Implemented:
 
-- ROKA project documentation and Hermes function impact maps.
-- Audit-only provenance metadata for staged memory and skill writes.
-- Session and role metadata fields for learning-related writes.
-- A regression test proving pending write payload replay remains unchanged.
+- Automatic execution-brief compilation from normal user messages.
+- CLI and Gateway `/moa` turns enter the same virtual MoA control facade; the
+  older context-only MoA path refuses ROKA-labelled payloads.
+- Three isolated advisor roles and one tool-enabled executor.
+- A stable brief for the entire user turn, including later tool iterations.
+- Per-role logical session IDs and provider/model provenance.
+- Actual fallback-route labels, accounting, and executor provenance.
+- Independent constraint and verification reviews on each execution iteration.
+- Loud degraded-mode reporting when an advisor is unavailable.
+- A single acting executor; new `delegate_task` subagent spawns are blocked.
+- ROKA-scoped approval gates for memory and skill writes.
+- Fail-closed pending-write persistence and validated pending IDs.
+- Evidence-gated background learning where `Nothing to save.` is normal.
+- Direct, isolated background review without recursively launching another MoA.
+- Fail-closed protection against an outer model fallback replacing the ROKA
+  facade mid-turn; provider-level fallback inside each role remains observable.
 
-Not implemented yet:
+ROKA is not a security sandbox, a bit-for-bit deterministic runtime, or a claim
+that an LLM can perfectly infer intent. The [Control Boundary](#control-boundary)
+section states exactly what the code enforces.
 
-- Full execution-brief renderer.
-- Multi-agent reviewer orchestration.
-- Risk-classified background review prompts.
-- ROKA-specific installer or release package.
+## Runtime Flow
 
-This is intentional. ROKA starts with traceability before changing behavior.
+```mermaid
+flowchart TD
+    U[Ordinary user request] --> I[Intent analyst\nno tools]
+    I --> B[Immutable execution brief]
+    B --> C[Constraint reviewer\nno tools]
+    B --> V[Verification reviewer\nno tools]
+    C --> E[Executor\ntools enabled]
+    V --> E
+    B --> E
+    E --> T[Existing Hermes tools]
+    T --> P[Provenance binding]
+    P --> W{Durable learning?}
+    W -->|No| R[Normal tool result]
+    W -->|Memory or skill| A[Existing approval queue]
+```
 
-## Why ROKA Exists
+The intent analyst runs first because the other roles must receive the exact
+same brief. The constraint and verification reviewers then run independently in
+parallel. Only the executor receives tool definitions.
 
-Hermes already has a powerful learning loop. It can remember useful facts,
-create and update skills, delegate work, run background review, and carry state
-across sessions.
+| Role | Default route | Responsibility |
+| --- | --- | --- |
+| `intent_analyst` | `openai-codex:gpt-5.5` | Convert the request into task, purpose, constraints, assumptions, and review rules. |
+| `constraint_reviewer` | `openrouter:deepseek/deepseek-v4-pro` | Find scope expansion, unsafe assumptions, conflicting constraints, and missing authority. |
+| `verification_reviewer` | `openrouter:google/gemini-3-pro-preview` | Demand observable evidence, tests, and repeatability before completion claims. |
+| `executor` | `openrouter:anthropic/claude-opus-4.8` | Act on the brief and reviewer findings using Hermes tools. |
 
-That power creates a control problem:
+These are defaults, not hard dependencies. Change models or providers in the
+`roka` MoA preset while preserving the three unique `advisor_role` values.
+If Hermes serves an advisor or executor through a configured fallback route,
+ROKA records the actual provider/model separately instead of presenting the
+configured route as the model that answered.
 
-- The same user request can produce different results after silent skill or
-  memory updates.
-- Background learning can improve future work, but it can also mutate the
-  agent's behavior without a clear audit path.
-- Parallel agents can be useful only if their histories, roles, assumptions,
-  and outputs remain separated.
-- A user cannot manually write a perfect structured brief for every task.
+## Quick Start
 
-ROKA treats those as command and control problems, not prompt-style problems.
+Clone and install the fork:
 
-The goal is to make agent work reproducible enough to inspect:
+```bash
+git clone https://github.com/EESIZ/ROKA-Agent.git
+cd ROKA-Agent
+python -m pip install -e .
+hermes setup
+```
 
-- What was the task?
-- Why was it done?
-- What constraints mattered?
-- Which model and agent role made the judgment?
-- Which session produced the proposed memory or skill change?
-- What evidence justified the change?
-- Was the change approved, staged, or rejected?
+On native Windows, the existing Hermes PowerShell installer can provision the
+same cloned fork. Run this from the `ROKA-Agent` checkout so the installer uses
+that repository's `origin` instead of creating a separate upstream checkout:
 
-## Core Model
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\install.ps1 -InstallDir (Get-Location).Path
+```
 
-ROKA uses Hermes terminology where possible.
+The default profile uses Codex authentication for the intent analyst and an
+OpenRouter API key for the other three models. Configure both through the normal
+Hermes setup flow.
 
-| ROKA concept | Hermes surface |
-| --- | --- |
-| Execution brief | Turn-scoped task, context, constraints, and metadata |
-| Agent session | Existing Hermes session or subagent session |
-| Role separation | Executor, reviewer, policy reviewer, context reviewer |
-| Learning proposal | Memory or skill write routed through existing gates |
-| Provenance | Metadata attached to pending records and memory mirrors |
-| Review loop | Background review, approval commands, and skill ledger |
+Start an interactive ROKA session:
 
-The execution brief is the center of the system. It should eventually carry:
+```bash
+hermes chat --provider moa --model roka
+```
 
-- `task`: what to do
-- `purpose`: why it matters
-- `constraints`: what must not be violated
-- `assumptions`: what the agent believes to be true
-- `deviation_rule`: when the agent may depart from the brief
-- `autonomy_policy`: what to do without immediate user contact
-- `review_policy`: how the result and learning should be checked
+Then type normal requests. No hand-written JSON or special command packet is
+required.
 
-The first runtime patch does not add the full brief yet. It prepares the audit
-path that the brief will use.
+Inside a regular Hermes session, run one ROKA-controlled turn with:
 
-## What Changed In Milestone 1
+```text
+/moa <your ordinary request>
+```
 
-### Pending Write Metadata
+ROKA is the default one-shot MoA preset in this fork. Generic Hermes MoA presets
+remain available and do not gain ROKA behavior unless they declare
+`control_mode: roka` and the three required advisor roles.
 
-`tools.write_approval.stage_write(...)` now accepts optional audit metadata.
+## Execution Brief
 
-The metadata is stored on pending records, but it is not part of the replay
-payload. That matters because old and new pending writes must approve in the
-same way.
+One brief is compiled for each real user turn:
 
-### Memory Write Provenance
+```json
+{
+  "brief_id": "brief_...",
+  "task": "what must be done",
+  "purpose": "why the result matters",
+  "constraints": ["boundaries that must not be crossed"],
+  "assumptions": ["premises currently treated as true"],
+  "deviation_rule": "when and how the executor may depart",
+  "autonomy_policy": "what may proceed without another question",
+  "review_policy": "what evidence is required before completion"
+}
+```
 
-`agent.background_review.build_memory_write_metadata(...)` now records optional
-ROKA fields:
+If the intent model fails or returns malformed output, ROKA creates a
+conservative fallback brief from the clean user request captured before
+memory, retrieval, or plugin context is injected. It does not silently drop
+the control layer. The same `brief_id` survives every tool iteration and an
+in-turn transcript-compression session rotation, then changes on the next user
+message. When later iterations display the original intent analysis again,
+its label includes `[cached]`; only the two reviewers and executor are called
+again.
 
-- `brief_id`
-- `agent_session_id`
-- `agent_role`
-- `model_provider`
-- `model`
-- `risk_class`
-- `evidence_refs`
+Each model call receives a separate message list and logical
+`agent_session_id`. Many provider APIs are stateless, so "session" here means an
+isolated conversation history and audit identity, not a promise that the remote
+provider stores server-side state.
 
-These fields make learning proposals inspectable without changing the memory
-tool's core behavior.
+## Learning Control
 
-### Skill Write Provenance
+When ROKA is active, Hermes' built-in `memory` and `skill_manage` mutation paths
+are routed through the existing approval gate even if the global compatibility
+default is off.
 
-`tools.skill_manager_tool.skill_manage(...)` now threads task/session metadata
-into staged skill writes through the existing skill write gate.
+- Memory writes may be approved inline when an interactive approval channel is
+  present; otherwise they are staged.
+- Skill writes are always staged because their behavioral impact and diff size
+  are larger.
+- Pending records include `brief_id`, parent and agent session IDs, role,
+  provider, model, task/tool call IDs, and risk class.
+- A pending record is reported as staged only after an atomic disk write
+  succeeds.
+- A staged result explicitly reports `saved: false` and
+  `requires_approval: true`; background review notifications include its
+  pending ID.
+- Background review must identify durable evidence. It is no longer instructed
+  to manufacture a skill update after most sessions.
 
-ROKA does not create a new skill mutation path. It reuses Hermes' existing gate.
+Review proposals with the existing commands:
 
-## Repository Guide
+```text
+/memory pending
+/memory approve <id>
+/memory reject <id>
+/skills pending
+/skills diff <id>
+/skills approve <id>
+/skills reject <id>
+```
 
-ROKA-specific files:
+## Control Boundary
 
-- [docs/roka-agent-doc-map.md](docs/roka-agent-doc-map.md)
-- [docs/roka-function-impact-map.md](docs/roka-function-impact-map.md)
-- [docs/roka-learning-control-map.md](docs/roka-learning-control-map.md)
-- [docs/roka-license-note.md](docs/roka-license-note.md)
+The runtime enforces:
 
-First milestone code paths:
+- Exactly three enabled, uniquely named advisor roles in a saved ROKA preset.
+- CLI and Gateway one-shot commands route through `provider=moa`; the legacy
+  context-synthesis entry point rejects ROKA mode instead of simulating it.
+- Intent compilation before reviewer fan-out.
+- Tool-free advisor calls and a single tool-enabled executor.
+- Removal of new subagent-spawn capability from the ROKA executor tool schema,
+  with an execution-middleware block as defense in depth.
+- Separate advisor message histories and logical session identities.
+- One frozen `ExecutionBrief` object per user turn.
+- The same brief in reviewer prompts and executor context, with its stable ID
+  in tool provenance and background-learning metadata.
+- Approval routing for ROKA memory and skill writes.
+- Visible failure/degraded labels instead of claiming every role ran.
+- Actual provider/model capture when Hermes uses an auxiliary fallback route.
+- Refusal of the outer Hermes fallback that would replace the control facade
+  with one direct model after an executor-route failure.
 
-- [tools/write_approval.py](tools/write_approval.py)
-- [agent/background_review.py](agent/background_review.py)
-- [tools/skill_manager_tool.py](tools/skill_manager_tool.py)
-- [tests/tools/test_write_approval.py](tests/tools/test_write_approval.py)
+The runtime cannot enforce:
 
-Upstream Hermes surfaces ROKA should prefer before adding new systems:
+- Perfect semantic recovery of an underspecified or contradictory request.
+- Identical natural-language output across stochastic model calls.
+- Availability, behavior, or retention policy of third-party model providers.
+- Truth of a reviewer opinion without external evidence.
+- Semantic obedience by the executor to every brief or reviewer instruction;
+  topology, context propagation, tool access, and approval routing are the
+  mechanically enforced parts.
+- Generic terminal/file writes, external memory-provider retention, or a
+  third-party plugin that bypasses Hermes' memory and skill APIs.
 
-- `agent/turn_context.py`
-- `agent/turn_finalizer.py`
-- `agent/background_review.py`
-- `agent/subagent_lifecycle.py`
-- `tools/delegate_tool.py`
-- `tools/memory_tool.py`
-- `tools/write_approval.py`
-- `tools/skill_manager_tool.py`
-- `tools/skill_ledger.py`
+For those reasons, verification reviewers guide the executor, while actual tool
+results and tests remain the evidence of completion.
+
+The approval boundary covers the built-in `memory` and `skill_manage` APIs. The
+background reviewer is runtime-whitelisted to those APIs only. The foreground
+executor still has ordinary Hermes tools, including powerful terminal and file
+operations, so ROKA is not a filesystem sandbox. Its prompt explicitly forbids
+using those tools to bypass approval, but hostile or out-of-process code must be
+controlled by operating-system isolation and plugin review.
+
+## Configuration
+
+The shipped `roka` preset lives in
+[`hermes_cli/config_defaults.py`](hermes_cli/config_defaults.py). Override it in
+the normal Hermes `config.yaml`:
+
+```yaml
+moa:
+  default_preset: roka
+  presets:
+    roka:
+      control_mode: roka
+      fanout: per_iteration
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+          advisor_role: intent_analyst
+        - provider: openrouter
+          model: deepseek/deepseek-v4-pro
+          advisor_role: constraint_reviewer
+        - provider: openrouter
+          model: google/gemini-3-pro-preview
+          advisor_role: verification_reviewer
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+```
+
+Validation rejects missing, duplicate, disabled, or unknown ROKA advisor roles
+at the configuration write boundary. A hand-edited invalid file runs visibly in
+degraded mode rather than silently relabeling models.
 
 ## Development
 
-Clone the repository:
+Install development dependencies in a local virtual environment, then use the
+repository's canonical per-file test runner:
 
 ```bash
-git clone git@github.com:EESIZ/ROKA-Agent.git
-cd ROKA-Agent
-```
-
-Run the focused milestone test:
-
-```bash
-uv run --with pytest python -m pytest tests/tools/test_write_approval.py -q
-```
-
-Run a syntax check for the first milestone files:
-
-```bash
-python -B -m py_compile \
-  tools/write_approval.py \
-  agent/background_review.py \
-  tools/skill_manager_tool.py \
+python -m venv .venv
+python -m pip install -e ".[dev]"
+scripts/run_tests.sh tests/agent/test_roka_control.py \
+  tests/agent/test_roka_moa_control.py \
+  tests/agent/test_roka_tool_binding.py \
+  tests/agent/test_roka_background_review.py \
   tests/tools/test_write_approval.py
 ```
 
-For general Hermes installation, provider setup, CLI usage, gateway setup, and
-upstream feature documentation, use the upstream Hermes docs:
-
-- https://hermes-agent.nousresearch.com/docs/
-- https://github.com/NousResearch/hermes-agent
-
-ROKA does not yet ship a separate installer.
+Do not invoke pytest directly. See
+[`mydocs/working/roka-v0.1-final.md`](mydocs/working/roka-v0.1-final.md) for the
+release evidence and [`docs/roka-function-impact-map.md`](docs/roka-function-impact-map.md)
+for the Hermes function map.
 
 ## Design Rules
 
-### 1. Do Not Rebuild Hermes
+1. Reuse Hermes before adding a subsystem.
+2. Preserve the user's purpose and constraints across every judgment point.
+3. Keep model histories isolated; merge findings, not mutable transcripts.
+4. Treat durable learning as a proposal backed by evidence.
+5. Prefer observable test results over agent self-evaluation.
+6. Keep generic Hermes behavior compatible outside ROKA mode.
 
-If Hermes already has a usable surface, use it first.
+## License
 
-Preferred order:
+Source code remains under the upstream-compatible [MIT License](LICENSE).
 
-1. configuration and policy
-2. documentation and operating profile
-3. existing hook or review flow
-4. small adapter around existing Hermes structures
-5. new core runtime code only as a last resort
+ROKA-specific methodology prose, diagrams, and project language are licensed
+separately under
+[CC BY-NC-SA 4.0](ROKA-CONTENT-LICENSE.md). This content license does not apply
+to source code or inherited Hermes material, and copyright does not grant
+exclusive ownership of abstract ideas, systems, or methods.
 
-### 2. Metadata Before Behavior
+ROKA-Agent is a fork of Hermes Agent. Upstream attribution and documentation:
 
-Before changing how an agent learns, record enough metadata to explain why a
-learning proposal exists.
-
-The current metadata is audit-only. It must not be required to replay a pending
-write.
-
-### 3. Separate Sessions
-
-Parallel agents may share the same brief, but they must not share one mutable
-conversation history.
-
-Required identifiers:
-
-- shared `brief_id`
-- unique `agent_session_id`
-- original `parent_session_id`
-- explicit `agent_role`
-- recorded `model_provider` and `model`
-
-### 4. Learning Is A Proposal
-
-Memory and skill updates should be classified by risk before becoming durable.
-
-Low-risk learning may eventually auto-commit when normal Hermes policy allows
-it. Behavior-changing skill edits should be staged for review.
-
-### 5. Shorter Commands Are The Health Signal
-
-As ROKA matures, the user should need less manual briefing, not more. If every
-task requires a long hand-written control packet, the system has failed to
-internalize intent.
-
-## Roadmap
-
-### Phase 1: Traceability
-
-- Keep the function maps current.
-- Add metadata to pending memory and skill writes.
-- Prove old pending replay behavior remains compatible.
-
-Status: implemented.
-
-### Phase 2: Execution Briefs
-
-- Define a structured execution brief object.
-- Render the brief into existing Hermes turn context.
-- Preserve prompt-cache behavior.
-- Store `brief_id` without forcing a new session model.
-
-### Phase 3: Learning Policy
-
-- Add risk classification to background review prompts.
-- Normalize "nothing to save" as a valid review result.
-- Prefer staged skill changes for behavior-affecting updates.
-- Improve pending summaries so users can approve or reject quickly.
-
-### Phase 4: Multi-Agent Review
-
-- Use existing Hermes delegation and subagent lifecycle surfaces.
-- Run executor and reviewer agents in separate sessions.
-- Merge only structured findings, evidence, and approved learning proposals.
-- Record model/provider/role for each agent.
-
-### Phase 5: ROKA Operating Profile
-
-- Provide a recommended config profile.
-- Document when to enable memory and skill write approval.
-- Add examples for deterministic task execution and review.
-
-## License And Attribution
-
-ROKA-Agent is a fork of Hermes Agent.
-
-Inherited Hermes Agent source code remains under the upstream MIT license. See
-[LICENSE](LICENSE) and the upstream project:
-
-- https://github.com/NousResearch/hermes-agent
-
-ROKA-specific methodology documents, diagrams, project language, and brand
-materials are tracked separately in
-[docs/roka-license-note.md](docs/roka-license-note.md) until the project owner
-chooses a formal content license.
-
-## Project Principle
-
-The agent should not become obedient by being watched harder.
-
-It should become reliable because the user's intent has been copied into the
-places where judgment happens.
+- [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+- [Hermes Agent documentation](https://hermes-agent.nousresearch.com/docs/)

@@ -192,6 +192,271 @@ def test_stage_write_persists_audit_metadata(hermes_home):
     }
 
 
+def test_empty_explicit_metadata_does_not_erase_bound_roka_provenance(hermes_home):
+    from agent.roka_control import bind_execution_metadata
+    from tools import write_approval as wa
+
+    with bind_execution_metadata(
+        {
+            "control_mode": "roka",
+            "brief_id": "bound-brief",
+            "agent_session_id": "bound-session",
+        }
+    ):
+        record = wa.stage_write(
+            "memory",
+            {"action": "add", "target": "memory", "content": "a"},
+            summary="a",
+            origin="foreground",
+            metadata={"brief_id": "", "agent_session_id": None},
+        )
+
+    loaded = wa.get_pending("memory", record["id"])
+    assert loaded["metadata"]["brief_id"] == "bound-brief"
+    assert loaded["metadata"]["agent_session_id"] == "bound-session"
+
+
+def test_explicit_metadata_cannot_relabel_bound_roka_execution(hermes_home):
+    from agent.roka_control import bind_execution_metadata
+    from tools import write_approval as wa
+
+    with bind_execution_metadata(
+        {
+            "control_mode": "roka",
+            "brief_id": "actual-brief",
+            "agent_session_id": "actual-session",
+            "model_provider": "actual-provider",
+            "model": "actual-model",
+        }
+    ):
+        record = wa.stage_write(
+            "memory",
+            {"action": "add", "target": "memory", "content": "a"},
+            summary="a",
+            origin="foreground",
+            metadata={
+                "control_mode": "generic",
+                "brief_id": "spoofed-brief",
+                "agent_session_id": "spoofed-session",
+                "model_provider": "spoofed-provider",
+                "model": "spoofed-model",
+            },
+        )
+
+    loaded = wa.get_pending("memory", record["id"])
+    assert loaded["metadata"]["control_mode"] == "roka"
+    assert loaded["metadata"]["brief_id"] == "actual-brief"
+    assert loaded["metadata"]["agent_session_id"] == "actual-session"
+    assert loaded["metadata"]["model_provider"] == "actual-provider"
+    assert loaded["metadata"]["model"] == "actual-model"
+
+
+def test_roka_context_forces_memory_approval_and_persists_provenance(
+    hermes_home, approval_callback_cleanup
+):
+    from agent.roka_control import bind_execution_metadata
+    from tools import write_approval as wa
+    from tools.memory_tool import MemoryStore, memory_tool
+    from tools.terminal_tool import set_approval_callback
+
+    set_approval_callback(None)
+    store = MemoryStore()
+    store.load_from_disk()
+    metadata = {
+        "control_mode": "roka",
+        "brief_id": "brief-1",
+        "agent_session_id": "executor-1",
+        "agent_role": "executor",
+        "model_provider": "fake",
+        "model": "executor-model",
+    }
+
+    with bind_execution_metadata(metadata):
+        result = json.loads(memory_tool("add", "memory", "candidate fact", store=store))
+
+    assert result["success"] is True
+    assert result["staged"] is True
+    assert result["saved"] is False
+    assert result["requires_approval"] is True
+    assert store.memory_entries == []
+    record = wa.get_pending("memory", result["pending_id"])
+    assert record["metadata"]["control_mode"] == "roka"
+    assert record["metadata"]["brief_id"] == "brief-1"
+    assert record["metadata"]["agent_session_id"] == "executor-1"
+    assert record["metadata"]["risk_class"] == "approval_required"
+
+
+def test_roka_context_forces_skill_approval_with_same_brief(hermes_home):
+    from agent.roka_control import bind_execution_metadata
+    from tools import write_approval as wa
+    from tools.skill_manager_tool import (
+        _apply_skill_write_gate,
+        _skill_execution_metadata,
+    )
+
+    with bind_execution_metadata(
+        {
+            "control_mode": "roka",
+            "brief_id": "brief-skill",
+            "agent_session_id": "executor-skill",
+            "agent_role": "executor",
+        }
+    ):
+        result = json.loads(
+            _apply_skill_write_gate(
+                "create",
+                "test-skill",
+                execution_metadata=_skill_execution_metadata(),
+                content=_SKILL,
+            )
+        )
+
+    assert result["success"] is True
+    assert result["staged"] is True
+    assert result["saved"] is False
+    assert result["requires_approval"] is True
+    record = wa.get_pending("skills", result["pending_id"])
+    assert record["metadata"]["brief_id"] == "brief-skill"
+    assert record["metadata"]["agent_session_id"] == "executor-skill"
+    assert record["metadata"]["risk_class"] == "approval_required"
+
+
+def test_skill_dispatch_session_does_not_replace_roka_role_session():
+    from agent.roka_control import bind_execution_metadata
+    from tools.skill_manager_tool import _skill_execution_metadata
+
+    with bind_execution_metadata(
+        {
+            "control_mode": "roka",
+            "brief_id": "brief-skill",
+            "parent_session_id": "parent-bound",
+            "agent_session_id": "logical-executor",
+            "agent_role": "executor",
+        }
+    ):
+        metadata = _skill_execution_metadata(
+            task_id="task-1",
+            session_id="parent-from-dispatch",
+        )
+
+    assert metadata["agent_session_id"] == "logical-executor"
+    assert metadata["parent_session_id"] == "parent-bound"
+    assert metadata["task_id"] == "task-1"
+
+
+def test_pending_ids_cannot_traverse_outside_the_pending_store(hermes_home):
+    from tools import write_approval as wa
+
+    assert wa.get_pending("memory", "../../outside") is None
+    assert wa.discard_pending("memory", "../../outside") is False
+
+
+def test_pending_ids_use_full_uuid_entropy(hermes_home):
+    from tools import write_approval as wa
+
+    record = wa.stage_write(
+        "memory",
+        {"action": "add", "target": "memory", "content": "candidate"},
+        summary="candidate",
+        origin="foreground",
+    )
+
+    assert len(record["id"]) == 32
+    assert all(char in "0123456789abcdef" for char in record["id"])
+
+
+def test_stage_write_raises_when_pending_record_cannot_be_persisted(
+    hermes_home, monkeypatch
+):
+    from pathlib import Path
+
+    from tools import write_approval as wa
+
+    blocker = Path(hermes_home) / "not-a-directory"
+    blocker.write_text("occupied", encoding="utf-8")
+    monkeypatch.setattr(wa, "_pending_dir", lambda _subsystem: blocker)
+
+    with pytest.raises(wa.PendingWritePersistenceError):
+        wa.stage_write(
+            "memory",
+            {"action": "add", "target": "memory", "content": "lost"},
+            summary="must persist",
+            origin="foreground",
+        )
+
+
+def test_memory_tool_reports_staging_failure_instead_of_fake_success(
+    hermes_home, monkeypatch
+):
+    from agent.roka_control import bind_execution_metadata
+    from tools import write_approval as wa
+    from tools.memory_tool import MemoryStore, memory_tool
+
+    def fail_stage(*_args, **_kwargs):
+        raise wa.PendingWritePersistenceError("disk unavailable")
+
+    monkeypatch.setattr(wa, "stage_write", fail_stage)
+    store = MemoryStore()
+    store.load_from_disk()
+    with bind_execution_metadata({"control_mode": "roka", "brief_id": "brief-1"}):
+        result = json.loads(memory_tool("add", "memory", "not stored", store=store))
+
+    assert result["success"] is False
+    assert "neither saved nor staged" in result["error"]
+    assert store.memory_entries == []
+
+
+def test_roka_memory_write_fails_closed_when_approval_gate_cannot_load(
+    hermes_home, monkeypatch
+):
+    import builtins
+
+    from agent.roka_control import bind_execution_metadata
+    from tools.memory_tool import MemoryStore, memory_tool
+
+    real_import = builtins.__import__
+
+    def import_without_write_gate(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "tools" and "write_approval" in (fromlist or ()):
+            raise ImportError("simulated unavailable approval gate")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_write_gate)
+    store = MemoryStore()
+    store.load_from_disk()
+    with bind_execution_metadata({"control_mode": "roka", "brief_id": "brief-1"}):
+        result = json.loads(memory_tool("add", "memory", "not stored", store=store))
+
+    assert result["success"] is False
+    assert "approval gate is unavailable" in result["error"]
+    assert store.memory_entries == []
+
+
+def test_roka_skill_write_fails_closed_when_approval_gate_cannot_load(
+    hermes_home, monkeypatch
+):
+    import builtins
+
+    from agent.roka_control import bind_execution_metadata
+    from tools.skill_manager_tool import _apply_skill_write_gate
+
+    real_import = builtins.__import__
+
+    def import_without_write_gate(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "tools" and "write_approval" in (fromlist or ()):
+            raise ImportError("simulated unavailable approval gate")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_write_gate)
+    with bind_execution_metadata({"control_mode": "roka", "brief_id": "brief-1"}):
+        result = json.loads(
+            _apply_skill_write_gate("create", "test-skill", content=_SKILL)
+        )
+
+    assert result["success"] is False
+    assert "approval gate is unavailable" in result["error"]
+
+
 def test_handle_approval_on(hermes_home):
     from hermes_cli.write_approval_commands import handle_pending_subcommand
     from tools import write_approval as wa

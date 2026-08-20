@@ -1926,7 +1926,10 @@ DEFAULT_CONFIG = {
     # mode around the main model, not a provider/model itself: references +
     # aggregator synthesize private guidance before each main-model iteration.
     "moa": {
-        "default_preset": "default",
+        # ROKA-Agent keeps generic MoA compatibility but makes the ROKA control
+        # preset the one-shot /moa default. Plain Hermes model sessions remain
+        # unchanged until the user selects provider=moa.
+        "default_preset": "roka",
         "active_preset": "",
         # When true, every MoA turn that runs the reference fan-out writes the
         # FULL turn (each reference's exact input messages + output + usage/cost,
@@ -1947,6 +1950,34 @@ DEFAULT_CONFIG = {
         #               the aggregator prompt (issue #59959).
         "privacy_filter": "",
         "presets": {
+            "roka": {
+                "control_mode": "roka",
+                "reference_models": [
+                    {
+                        "provider": "openai-codex",
+                        "model": "gpt-5.5",
+                        "advisor_role": "intent_analyst",
+                    },
+                    {
+                        "provider": "openrouter",
+                        "model": "deepseek/deepseek-v4-pro",
+                        "advisor_role": "constraint_reviewer",
+                    },
+                    {
+                        "provider": "openrouter",
+                        "model": "google/gemini-3-pro-preview",
+                        "advisor_role": "verification_reviewer",
+                    },
+                ],
+                "aggregator": {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-opus-4.8",
+                },
+                "reference_max_tokens": 900,
+                "fanout": "per_iteration",
+                "degraded_reference_policy": "loud",
+                "enabled": True,
+            },
             "default": {
                 "reference_models": [
                     {"provider": "openai-codex", "model": "gpt-5.5"},

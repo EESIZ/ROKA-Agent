@@ -350,6 +350,8 @@ export function ModelSettings({ onMainModelChanged, scopeProfile = null }: Model
     return moa.presets[selectedMoaPreset] || moa.presets[moa.default_preset] || Object.values(moa.presets)[0] || null
   }, [moa, selectedMoaPreset])
 
+  const isRokaMoaPreset = currentMoaPreset?.control_mode === 'roka'
+
   // Mirror of `moa` so inline edits compute the next state purely (outside the
   // setState updater) and hand it straight to the debounced autosave.
   const moaRef = useRef<MoaConfigResponse | null>(null)
@@ -1138,7 +1140,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile = null }: Model
                   <Switch
                     aria-label={`${slot.enabled !== false ? 'Disable' : 'Enable'} reference ${index + 1}`}
                     checked={slot.enabled !== false}
-                    disabled={applying}
+                    disabled={applying || isRokaMoaPreset}
                     onCheckedChange={checked =>
                       updateMoaPreset(prev => ({
                         ...prev,
@@ -1203,7 +1205,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile = null }: Model
                       </SelectContent>
                     </Select>
                     <Button
-                      disabled={currentMoaPreset.reference_models.length <= 1 || applying}
+                      disabled={isRokaMoaPreset || currentMoaPreset.reference_models.length <= 1 || applying}
                       onClick={() =>
                         updateMoaPreset(prev => ({
                           ...prev,
@@ -1221,6 +1223,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile = null }: Model
                 description={
                   <span className="font-mono text-[0.68rem]">
                     {slot.provider} · {slot.model || m.model}
+                    {slot.advisor_role ? ` · ${slot.advisor_role}` : ''}
                   </span>
                 }
                 key={`${selectedMoaPreset}-${index}`}
@@ -1228,7 +1231,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile = null }: Model
               />
             ))}
             <Button
-              disabled={applying}
+              disabled={applying || isRokaMoaPreset}
               onClick={() =>
                 updateMoaPreset(prev => ({
                   ...prev,

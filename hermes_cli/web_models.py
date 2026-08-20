@@ -151,6 +151,9 @@ class ModelAssignment(BaseModel):
 class MoaModelSlot(BaseModel):
     provider: str = ""
     model: str = ""
+    advisor_role: Optional[
+        Literal["intent_analyst", "constraint_reviewer", "verification_reviewer"]
+    ] = None
     # Optional per-slot reasoning effort. Declared so a client round-tripping
     # the GET payload doesn't have it stripped at parse time and wiped on save.
     reasoning_effort: Optional[str] = None
@@ -183,6 +186,7 @@ class _MoaReferenceControls(BaseModel):
 
 
 class MoaPresetPayload(_MoaReferenceControls):
+    control_mode: Optional[Literal["roka"]] = None
     reference_models: list[MoaModelSlot] = []
     aggregator: MoaModelSlot = MoaModelSlot()
     # None = temperature omitted from API calls (provider default), matching
@@ -206,6 +210,7 @@ class MoaConfigPayload(_MoaReferenceControls):
     # clients during this PR's transition window.
     reference_models: list[MoaModelSlot] = []
     aggregator: MoaModelSlot = MoaModelSlot()
+    control_mode: Optional[Literal["roka"]] = None
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
     max_tokens: int = 4096
@@ -738,4 +743,3 @@ class _PluginProvidersPutBody(BaseModel):
 
 class _PluginVisibilityBody(BaseModel):
     hidden: bool
-

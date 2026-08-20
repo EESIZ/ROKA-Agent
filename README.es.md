@@ -1,6 +1,5 @@
-<p align="center">
-  <img src="assets/banner.png" alt="Hermes Agent" width="100%">
-</p>
+> This inherited Hermes Agent translation does not describe the ROKA control
+> profile. See [README.md](README.md) for the current project documentation.
 
 # Hermes Agent ☤
 <p align="center">

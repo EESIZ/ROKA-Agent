@@ -558,6 +558,18 @@ def _run_agent_tool_execution_middleware(
         run_tool_execution_middleware,
     )
 
+    if (
+        scope_block is None
+        and getattr(agent, "_roka_control_mode", "") == "roka"
+        and function_name == "delegate_task"
+        and str(function_args.get("action") or "spawn").strip().lower()
+        not in {"list", "steer", "stop"}
+    ):
+        scope_block = (
+            "ROKA blocks new subagent delegation until the execution brief and "
+            "approval policy can be inherited by the child agent."
+        )
+
     trace = middleware_trace if middleware_trace is not None else []
     state = {
         "args": function_args,
@@ -687,7 +699,18 @@ def _run_agent_tool_execution_middleware(
         )
         _hb_thread.start()
         try:
-            return execute(final_args)
+            from agent.roka_control import (
+                bind_execution_metadata,
+                execution_metadata_for_agent,
+            )
+
+            execution_metadata = execution_metadata_for_agent(
+                agent,
+                task_id=effective_task_id,
+                tool_call_id=tool_call_id,
+            )
+            with bind_execution_metadata(execution_metadata):
+                return execute(final_args)
         finally:
             _hb_stop.set()
             _hb_thread.join(timeout=2.0)
