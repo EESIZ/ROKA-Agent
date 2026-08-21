@@ -1,5 +1,56 @@
-> This inherited Hermes Agent translation does not describe the ROKA control
-> profile. See [README.md](README.md) for the current project documentation.
+> 本文件顶部包含 ROKA 起源说明。后面的 Hermes Agent 继承翻译可能不描述当前
+> ROKA control profile。完整项目文档请参见 [README.md](README.md)。
+
+## ROKA 起源说明
+
+ROKA 的出发点是一个简单观察：许多 AI 使用失败并不是从模型能力失败开始，
+而是从意图传递失败开始。用户往往有很强的期待，但没有把期待完整地定义进
+指令。模型根据可见 prompt 作答，而用户却用不可见的标准评价结果。
+
+这不是 AI 独有的问题。人类组织也长期面对同一问题。HR、组织管理、领导力
+研究和军事指挥理论都在处理同一个循环：定义意图，传递意图，让另一个行动
+者在不完整上下文中判断，评估结果，并把修正反馈到下一次命令。
+
+ROKA 来自两条平行演化线的类比：一条是从拿破仑时代到 C4I/CJADC2 的军事
+指挥体系，另一条是从简单 prompt 到 agent orchestration 的 LLM 控制体系。
+
+```mermaid
+flowchart LR
+    subgraph M[军事指挥体系]
+        direction LR
+        M1["拿破仑时代<br/>军令传递与军团机动<br/>缓慢而脆弱的通信"]
+        M2["参谋体系<br/>命令、地图、报告<br/>标准化指挥 payload"]
+        M3["无线电与现代机动<br/>更快的观察<br/>更高的协调负担"]
+        M4["任务式指挥<br/>任务 + 目的 + 约束<br/>边缘判断授权"]
+        M5["C4I / CJADC2<br/>共享观察<br/>分布式执行<br/>意图跨层复制"]
+    end
+
+    subgraph L[LLM 控制体系]
+        direction LR
+        L1["简单 prompt<br/>隐含期待<br/>模型猜测意图"]
+        L2["Prompt engineering<br/>角色、格式、示例<br/>标准化指令 payload"]
+        L3["RAG / 工具 / 记忆<br/>更多上下文<br/>更高上下文管理负担"]
+        L4["Agent orchestration<br/>planner, critic, verifier<br/>按角色分离判断"]
+        L5["ROKA profile<br/>execution brief<br/>隔离 advisors<br/>单一 executor"]
+    end
+
+    M1 --> M2 --> M3 --> M4 --> M5
+    L1 --> L2 --> L3 --> L4 --> L5
+
+    M1 -. "意图必须穿过距离与延迟" .- L1
+    M2 -. "命令变成 payload" .- L2
+    M3 -. "信息越多，协调负担越大" .- L3
+    M4 -. "自治需要共享意图" .- L4
+    M5 -. "观察、判断、行动被刻意分离" .- L5
+```
+
+更多上下文并不总是等于更好的对齐。组织中有些惯例原本用于解决协调问题，
+后来却可能变成坏习惯。AI agent 也会发生类似漂移：记忆、RAG、历史对话、
+工具轨迹可能都是真的，却不再符合当前用户的目的。
+
+因此 ROKA 不把堆叠上下文当作最终答案。所有上下文都必须通过当前 execution
+brief 解释：现在要做什么，为什么重要，哪些边界不能越过，以及需要什么证据
+才能宣称完成。
 
 # Hermes Agent ☤
 

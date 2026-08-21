@@ -1,5 +1,65 @@
-> This inherited Hermes Agent translation does not describe the ROKA control
-> profile. See [README.md](README.md) for the current project documentation.
+> Esta traducción incluye primero una nota de origen de ROKA. El contenido
+> heredado de Hermes Agent que aparece después puede no describir el perfil
+> actual de ROKA. Consulta [README.md](README.md) para la documentación completa.
+
+## Nota de origen de ROKA
+
+ROKA parte de una observación sencilla: muchos fallos en el uso de IA no
+empiezan como fallos del modelo, sino como fallos de transferencia de intención.
+El usuario tiene una expectativa fuerte pero no siempre la convierte en una
+orden explícita. El modelo responde al prompt visible, mientras el usuario
+evalúa el resultado contra un estándar invisible.
+
+El mismo problema aparece en organizaciones humanas. RR. HH., gestión,
+liderazgo y doctrina de mando militar estudian el mismo bucle: definir la
+intención, transmitirla, permitir que otra persona juzgue con contexto
+incompleto, evaluar el resultado y devolver esa corrección a la siguiente
+orden.
+
+ROKA nació al comparar dos líneas de evolución: los sistemas de mando militar,
+desde la era napoleónica hasta C4I/CJADC2, y los sistemas de control de LLM,
+desde el prompt simple hasta la orquestación de agentes.
+
+```mermaid
+flowchart LR
+    subgraph M[Sistemas de mando militar]
+        direction LR
+        M1["Era napoleónica<br/>despachos y maniobra de cuerpos<br/>comunicación lenta y frágil"]
+        M2["Sistema de estado mayor<br/>órdenes, mapas, informes<br/>payloads de mando estandarizados"]
+        M3["Radio y maniobra moderna<br/>observación más rápida<br/>mayor carga de coordinación"]
+        M4["Mission command<br/>tarea + propósito + restricciones<br/>juicio delegado al borde"]
+        M5["C4I / CJADC2<br/>observación compartida<br/>ejecución distribuida<br/>intención replicada"]
+    end
+
+    subgraph L[Sistemas de control LLM]
+        direction LR
+        L1["Prompt simple<br/>expectativa implícita<br/>el modelo adivina intención"]
+        L2["Prompt engineering<br/>rol, formato, ejemplos<br/>payloads de instrucción"]
+        L3["RAG / herramientas / memoria<br/>más contexto<br/>más carga de gestión"]
+        L4["Orquestación de agentes<br/>planner, critic, verifier<br/>juicio separado por rol"]
+        L5["Perfil ROKA<br/>execution brief<br/>advisors aislados<br/>executor único"]
+    end
+
+    M1 --> M2 --> M3 --> M4 --> M5
+    L1 --> L2 --> L3 --> L4 --> L5
+
+    M1 -. "la intención debe sobrevivir a la distancia" .- L1
+    M2 -. "las órdenes se vuelven payloads" .- L2
+    M3 -. "más información aumenta la coordinación" .- L3
+    M4 -. "la autonomía requiere intención compartida" .- L4
+    M5 -. "observación, juicio y acción se separan" .- L5
+```
+
+Más contexto no siempre significa mejor alineación. Una organización puede
+acumular costumbres que antes resolvían coordinación y luego se vuelven malos
+hábitos. Un agente de IA puede derivar de forma similar: memoria, RAG, historial
+o trazas de herramientas pueden ser verdaderas, pero no estar alineadas con el
+propósito actual del usuario.
+
+Por eso ROKA no trata la acumulación de contexto como respuesta final. Todo
+contexto debe pasar por el execution brief actual: qué se intenta hacer, por
+qué importa, qué límites no deben cruzarse y qué evidencia hace falta antes de
+declarar completado el trabajo.
 
 # Hermes Agent ☤
 <p align="center">

@@ -1,7 +1,68 @@
 <div dir="rtl">
 
-> This inherited Hermes Agent translation does not describe the ROKA control
-> profile. See [README.md](README.md) for the current project documentation.
+> اس فائل کے شروع میں ROKA کے آغاز کی نوٹ شامل ہے۔ اس کے بعد آنے والا inherited
+> Hermes Agent ترجمہ موجودہ ROKA control profile کو مکمل طور پر بیان نہیں کر
+> سکتا۔ مکمل project documentation کے لیے [README.md](README.md) دیکھیں۔
+
+## ROKA کے آغاز کی وجہ
+
+ROKA ایک سادہ مشاہدے سے شروع ہوا: AI کے استعمال میں بہت سی ناکامیاں پہلے ماڈل کی
+ناکامی نہیں ہوتیں، بلکہ نیت کی منتقلی کی ناکامی ہوتی ہیں۔ صارف کے ذہن میں توقع
+مضبوط ہوتی ہے، مگر وہ توقع ہمیشہ ہدایت میں واضح نہیں ہوتی۔ ماڈل نظر آنے والے prompt
+پر جواب دیتا ہے، جبکہ صارف نتیجے کو ایک ایسے معیار سے پرکھتا ہے جو prompt میں موجود
+نہیں تھا۔
+
+یہ مسئلہ صرف AI کا نہیں ہے۔ انسانی تنظیمیں بھی یہی مسئلہ حل کرتی رہی ہیں۔ HR،
+management، leadership، اور فوجی command doctrine سب ایک ہی loop کو دیکھتے ہیں:
+نیت کو define کرنا، اسے منتقل کرنا، دوسرے actor کو نامکمل context میں judgment کرنے
+دینا، نتیجہ evaluate کرنا، اور correction کو اگلی ہدایت میں واپس شامل کرنا۔
+
+ROKA دو parallel ترقیاتی خطوط کے موازنے سے بنا: ایک طرف Napoleonic era سے C4I /
+CJADC2 تک military command systems، اور دوسری طرف plain prompt سے agent
+orchestration تک LLM control systems۔
+
+<div dir="ltr">
+
+```mermaid
+flowchart LR
+    subgraph M[Military command systems]
+        direction LR
+        M1["Napoleonic era<br/>dispatches and corps maneuver<br/>slow, fragile communication"]
+        M2["Staff system<br/>orders, maps, reports<br/>standardized command payloads"]
+        M3["Radio and modern maneuver<br/>faster observation<br/>higher coordination load"]
+        M4["Mission command<br/>task + purpose + constraints<br/>judgment delegated to the edge"]
+        M5["C4I / CJADC2<br/>shared observation<br/>distributed execution<br/>intent replicated"]
+    end
+
+    subgraph L[LLM control systems]
+        direction LR
+        L1["Plain prompt<br/>implicit expectation<br/>model guesses intent"]
+        L2["Prompt engineering<br/>role, format, examples<br/>standardized instruction payloads"]
+        L3["RAG / tools / memory<br/>more context<br/>higher context-management load"]
+        L4["Agent orchestration<br/>planner, critic, verifier<br/>judgment separated by role"]
+        L5["ROKA profile<br/>execution brief<br/>isolated advisors<br/>single executor"]
+    end
+
+    M1 --> M2 --> M3 --> M4 --> M5
+    L1 --> L2 --> L3 --> L4 --> L5
+
+    M1 -. "intent must survive distance" .- L1
+    M2 -. "orders become payloads" .- L2
+    M3 -. "more information increases coordination burden" .- L3
+    M4 -. "autonomy requires shared intent" .- L4
+    M5 -. "observation, judgment, and action are separated" .- L5
+```
+
+</div>
+
+زیادہ context ہمیشہ بہتر alignment نہیں ہوتا۔ کسی تنظیم میں ایک روایت کبھی
+coordination کے لیے مفید ہو سکتی ہے، مگر بعد میں بری عادت بن سکتی ہے۔ AI agent بھی
+اسی طرح drift کر سکتا ہے: memory، RAG، پچھلی گفتگو، یا tool traces درست ہو سکتے
+ہیں، مگر موجودہ صارف کے مقصد سے aligned نہ ہوں۔
+
+اسی لیے ROKA صرف context جمع کرنے کو آخری جواب نہیں سمجھتا۔ ہر context کو موجودہ
+execution brief کے ذریعے پڑھا جانا چاہیے: ابھی کیا کرنا ہے، کیوں اہم ہے، کون سی
+حدود برقرار رہنی ہیں، اور completion claim سے پہلے کون سا evidence چاہیے۔
 
 # ہرمیس ایجنٹ ☤ (Hermes Agent)
 

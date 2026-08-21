@@ -1,6 +1,7 @@
 # ROKA-Agent
 
-[한국어](README.ko.md) | English
+English | [한국어](README.ko.md) | [Español](README.es.md) |
+[中文](README.zh-CN.md) | [اردو](README.ur-pk.md)
 
 ROKA-Agent is an intent-preserving control profile for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
@@ -17,25 +18,77 @@ ROKA does not replace Hermes sessions, tools, model routing, memory, skills, or
 approval storage. Its first engineering rule is **do not rebuild the wheel**:
 extend existing Hermes functions at the smallest useful control points.
 
+## Why Intent Matters
+
+Many failures in AI use do not begin as model failures. They begin as intent
+transfer failures.
+
+A user often has a strong expectation but an underspecified request. The model
+then produces an answer from the visible prompt, while the user evaluates it
+against an invisible standard. Even a capable model can feel wrong when the
+system never made the user's task, purpose, constraints, assumptions, and review
+criteria explicit.
+
+This is not unique to AI. Human organizations face the same problem. HR,
+management theory, and military command doctrine all study the same loop:
+define intent, transmit it, let another actor judge under incomplete context,
+evaluate the result, and feed the correction back into the next order.
+
+ROKA treats this as the central control problem for LLM agents. Technical
+friction will keep shrinking as models, tools, and infrastructure improve. The
+harder bottleneck is the human one: defining intent, communicating it, and
+checking whether another actor understood it. ROKA tries to move that bottleneck
+out of individual leadership instinct and into the default shape of the
+execution system.
+
 ## Conceptual Origin
 
 ROKA started from a structural analogy between two fields that look unrelated at
-first glance: modern command-and-control doctrine and LLM harness engineering.
+first glance: military command systems and prompt systems.
 
-Military command systems evolved from simple orders toward richer command
-payloads: situational reports, METT-TC-style context, 9-Line formats, mission
-command, C4I, and eventually joint data-centric concepts such as CJADC2. The
-pattern is not "more control" or "more autonomy" by itself. The pattern is that
-the observer and the actor are often separated, and the system survives that
-separation by transmitting intent, context, and constraints before the link is
-lost or the situation changes.
+Napoleonic-era command already had the core problem: a commander could observe,
+decide, and dispatch orders, but the unit receiving those orders had to act
+later, elsewhere, under changed conditions. Modern command systems evolved from
+simple orders toward richer command payloads: staff reports, maps, radio
+coordination, mission command, C4I, and eventually joint data-centric concepts
+such as CJADC2.
 
-LLM agents have been moving through a similar progression: simple prompts,
-structured prompts, tool policies, memory, retrieval, and multi-agent
-orchestration. A plain prompt is like a short order with too much left implicit.
-A pile of context is like a headquarters feed with no mission command. A fully
-autonomous agent without shared intent becomes locally clever and globally
-fragile.
+Prompt engineering has been moving through a parallel line. It began with plain
+prompts, then structured prompts, role instructions, examples, tool policies,
+memory, retrieval, and multi-agent orchestration. A plain prompt is like a short
+order with too much left implicit. A pile of context is like a headquarters feed
+with no mission command. A fully autonomous agent without shared intent becomes
+locally clever and globally fragile.
+
+```mermaid
+flowchart LR
+    subgraph M[Military command systems]
+        direction LR
+        M1["Napoleonic era<br/>dispatches and corps maneuver<br/>slow, fragile communication"]
+        M2["Staff system<br/>orders, maps, reports<br/>standardized command payloads"]
+        M3["Radio and modern maneuver<br/>faster observation<br/>higher coordination load"]
+        M4["Mission command<br/>task + purpose + constraints<br/>judgment delegated to the edge"]
+        M5["C4I / CJADC2<br/>shared observation<br/>distributed execution<br/>intent replicated across layers"]
+    end
+
+    subgraph L[LLM control systems]
+        direction LR
+        L1["Plain prompt<br/>implicit expectation<br/>model guesses intent"]
+        L2["Prompt engineering<br/>role, format, examples<br/>standardized instruction payloads"]
+        L3["RAG / tools / memory<br/>more context<br/>higher context-management load"]
+        L4["Agent orchestration<br/>planner, critic, verifier<br/>judgment separated by role"]
+        L5["ROKA profile<br/>execution brief<br/>isolated advisors<br/>single executor"]
+    end
+
+    M1 --> M2 --> M3 --> M4 --> M5
+    L1 --> L2 --> L3 --> L4 --> L5
+
+    M1 -. "intent must survive distance" .- L1
+    M2 -. "orders become payloads" .- L2
+    M3 -. "more information increases coordination burden" .- L3
+    M4 -. "autonomy requires shared intent" .- L4
+    M5 -. "observation, judgment, and action are separated" .- L5
+```
 
 The design question behind ROKA was therefore:
 
@@ -45,7 +98,8 @@ The design question behind ROKA was therefore:
 ROKA's answer is the runtime pattern used in this fork:
 
 - Compile the user's ordinary request into one immutable execution brief.
-- Put observation and critique in separate tool-free advisor contexts.
+- Put constraint and verification judgment in separate tool-free advisor
+  contexts.
 - Give action to one tool-enabled executor.
 - Preserve the same task, purpose, constraints, assumptions, deviation rule,
   autonomy policy, and review policy through every execution iteration.
@@ -56,6 +110,20 @@ This is also why ROKA avoids military vocabulary in the runtime interface. The
 military analogy explains the origin of the idea; the implementation remains a
 Hermes control profile built from existing Hermes concepts: MoA presets,
 reference models, tools, memory, skills, approval gates, and provider routing.
+
+## Context Is Not Always Alignment
+
+More context is usually helpful, but context is not the same as intent.
+
+Human organizations often develop local customs that once solved a coordination
+problem but later become harmful habits. An AI agent can drift in the same way:
+memory, retrieval, prior chat history, or tool traces may add context that is
+true but no longer aligned with the current user's purpose.
+
+ROKA therefore does not treat context accumulation as the final answer. Context
+must be filtered through the current execution brief. The brief says what the
+system is trying to do now, why it matters, what boundaries must hold, and what
+evidence is required before the executor can claim completion.
 
 ## Release Status
 
